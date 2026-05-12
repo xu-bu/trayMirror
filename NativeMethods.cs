@@ -24,6 +24,17 @@ namespace TrayMirror
         [DllImport("user32.dll", SetLastError = true)]
         public static extern int GetWindowText(IntPtr hWnd, StringBuilder lpString, int nMaxCount);
 
+        [DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+        public static extern int GetClassName(IntPtr hWnd, StringBuilder lpClassName, int nMaxCount);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        public static extern bool EnumChildWindows(IntPtr hWndParent, EnumWindowsProc lpEnumFunc, IntPtr lParam);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        public static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, IntPtr lParam);
+
+        public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+
         // ── 消息发送 ────────────────────────────────────────────────
         [DllImport("user32.dll", SetLastError = true)]
         public static extern IntPtr SendMessage(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam);
@@ -81,23 +92,50 @@ namespace TrayMirror
         [DllImport("user32.dll")]
         public static extern IntPtr CopyIcon(IntPtr hIcon);
 
+        [DllImport("comctl32.dll", SetLastError = true)]
+        public static extern IntPtr ImageList_GetIcon(IntPtr himl, int i, uint flags);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        public static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter,
+            int X, int Y, int cx, int cy, uint uFlags);
+
         // ── 鼠标 ────────────────────────────────────────────────────
+
         [DllImport("user32.dll")]
         public static extern bool GetCursorPos(out POINT lpPoint);
 
         [DllImport("user32.dll")]
         public static extern bool SetCursorPos(int X, int Y);
 
+        [DllImport("user32.dll")]
+        public static extern bool ShowWindowAsync(IntPtr hWnd, int nCmdShow);
+
+        [DllImport("user32.dll")]
+        public static extern bool SetForegroundWindow(IntPtr hWnd);
+
+        [DllImport("user32.dll")]
+        public static extern bool IsIconic(IntPtr hWnd);
+
         // ── 常量 ────────────────────────────────────────────────────
-        public const uint PROCESS_ALL_ACCESS = 0x1F0FFF;
+        // Avoid PROCESS_ALL_ACCESS (often blocked by UIPI / permissions on Win11).
+        public const uint PROCESS_QUERY_INFORMATION = 0x0400;
+        public const uint PROCESS_QUERY_LIMITED_INFORMATION = 0x1000;
+        public const uint PROCESS_VM_OPERATION = 0x0008;
+        public const uint PROCESS_VM_READ = 0x0010;
+        public const uint PROCESS_VM_WRITE = 0x0020;
+
+        public const uint PROCESS_TRAY_READ =
+            PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_OPERATION | PROCESS_VM_READ | PROCESS_VM_WRITE;
         public const uint MEM_COMMIT = 0x1000;
         public const uint MEM_RELEASE = 0x8000;
         public const uint PAGE_READWRITE = 0x04;
 
         public const uint TB_BUTTONCOUNT = 0x0418;
         public const uint TB_GETBUTTON = 0x0417;
+        public const uint TB_GETIMAGELIST = 0x0431;
 
         public const uint WM_LBUTTONDOWN = 0x0201;
+
         public const uint WM_LBUTTONUP = 0x0202;
         public const uint WM_RBUTTONDOWN = 0x0204;
         public const uint WM_RBUTTONUP = 0x0205;
@@ -110,6 +148,15 @@ namespace TrayMirror
         public const uint EVENT_OBJECT_REORDER = 0x8004;
 
         public const uint DI_NORMAL = 0x0003;
+        public const uint ILD_TRANSPARENT = 0x0001;
+
+        public static readonly IntPtr HWND_TOPMOST = new(-1);
+
+        public const uint SWP_NOACTIVATE = 0x0010;
+        public const uint SWP_SHOWWINDOW = 0x0040;
+        public const int SW_RESTORE = 9;
+        public const int SW_SHOW = 5;
+
 
         // ── 结构体 ──────────────────────────────────────────────────
         [StructLayout(LayoutKind.Sequential)]

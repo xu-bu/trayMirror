@@ -1,6 +1,8 @@
 using System;
+using System.Drawing;
 using System.Linq;
 using System.Windows.Forms;
+
 
 namespace TrayMirror
 {
@@ -11,6 +13,7 @@ namespace TrayMirror
         {
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
+            StartupRegistration.EnsureRegistered();
 
             // 防止重复启动
             using var mutex = new System.Threading.Mutex(true, "TrayMirror_SingleInstance", out bool isNew);
@@ -48,8 +51,13 @@ namespace TrayMirror
             var menu = new ContextMenuStrip();
             menu.Items.Add("重新定位副屏覆盖层", null, (_, _) =>
             {
-                overlays.ForEach(f => f.Invalidate());
+                overlays.ForEach(f =>
+                {
+                    f.PositionOverlay();
+                    f.Invalidate();
+                });
             });
+
             menu.Items.Add(new ToolStripSeparator());
             menu.Items.Add("退出", null, (_, _) =>
             {

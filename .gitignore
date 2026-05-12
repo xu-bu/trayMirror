@@ -1,0 +1,12 @@
+# Build outputs
+bin/
+obj/
+out-verify/
+
+# User-specific files
+.vs/
+*.user
+*.suo
+
+# Logs
+*.log
