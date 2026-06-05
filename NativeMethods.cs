@@ -99,6 +99,47 @@ namespace TrayMirror
         public static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter,
             int X, int Y, int cx, int cy, uint uFlags);
 
+        // ── 分层窗口（每像素 Alpha 透明）──────────────────────────────
+        [DllImport("user32.dll", SetLastError = true)]
+        public static extern bool UpdateLayeredWindow(IntPtr hwnd, IntPtr hdcDst,
+            ref POINT pptDst, ref SIZE psize,
+            IntPtr hdcSrc, ref POINT pptSrc,
+            int crKey, ref BLENDFUNCTION pblend, uint dwFlags);
+
+        [DllImport("gdi32.dll", SetLastError = true)]
+        public static extern IntPtr CreateCompatibleDC(IntPtr hdc);
+
+        [DllImport("gdi32.dll", SetLastError = true)]
+        public static extern IntPtr SelectObject(IntPtr hdc, IntPtr hgdiObj);
+
+        [DllImport("gdi32.dll", SetLastError = true)]
+        public static extern bool DeleteDC(IntPtr hdc);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        public static extern IntPtr GetDC(IntPtr hwnd);
+
+        [DllImport("user32.dll")]
+        public static extern int ReleaseDC(IntPtr hwnd, IntPtr hdc);
+
+        [StructLayout(LayoutKind.Sequential)]
+        public struct BLENDFUNCTION
+        {
+            public byte BlendOp;
+            public byte BlendFlags;
+            public byte SourceConstantAlpha;
+            public byte AlphaFormat;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        public struct SIZE
+        {
+            public int cx, cy;
+        }
+
+        public const byte AC_SRC_OVER = 0x00;
+        public const byte AC_SRC_ALPHA = 0x01;
+        public const uint ULW_ALPHA = 0x00000002;
+
         // ── 鼠标 ────────────────────────────────────────────────────
 
         [DllImport("user32.dll")]
@@ -116,6 +157,58 @@ namespace TrayMirror
         [DllImport("user32.dll")]
         public static extern bool IsIconic(IntPtr hWnd);
 
+        [DllImport("user32.dll")]
+        public static extern bool IsHungAppWindow(IntPtr hWnd);
+
+        [DllImport("user32.dll")]
+        public static extern IntPtr GetForegroundWindow();
+
+        [DllImport("user32.dll")]
+        public static extern bool BringWindowToTop(IntPtr hWnd);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        public static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, bool fAttach);
+
+        [DllImport("user32.dll")]
+        public static extern bool ClientToScreen(IntPtr hWnd, out POINT lpPoint);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        public static extern uint SendInput(uint nInputs, INPUT[] pInputs, int cbSize);
+
+        [DllImport("kernel32.dll")]
+        public static extern uint GetCurrentThreadId();
+
+        // ── DWM 毛玻璃 / 亚克力 ────────────────────────────────────────
+        [DllImport("dwmapi.dll")]
+        public static extern int DwmSetWindowAttribute(IntPtr hwnd, int dwAttribute, ref int pvAttribute, int cbAttribute);
+
+        [DllImport("dwmapi.dll")]
+        public static extern int DwmExtendFrameIntoClientArea(IntPtr hwnd, ref MARGINS pMarInset);
+
+        [DllImport("dwmapi.dll")]
+        public static extern int DwmEnableBlurBehindWindow(IntPtr hwnd, ref DWM_BLURBEHIND pBlurBehind);
+
+        [StructLayout(LayoutKind.Sequential)]
+        public struct MARGINS
+        {
+            public int cxLeftWidth, cxRightWidth, cyTopHeight, cyBottomHeight;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        public struct DWM_BLURBEHIND
+        {
+            public uint dwFlags;
+            public bool fEnable;
+            public IntPtr hRgnBlur;
+            public bool fTransitionOnMaximized;
+        }
+
+        public const int DWMWA_USE_IMMERSIVE_DARK_MODE = 20;
+        public const int DWMWA_SYSTEMBACKDROP_TYPE = 38;
+        public const int DWMWA_WINDOW_CORNER_PREFERENCE = 33;
+        public const int DWMWCP_ROUND = 1;
+        public const uint DWM_BB_ENABLE = 0x00000001;
+
         // ── 常量 ────────────────────────────────────────────────────
         // Avoid PROCESS_ALL_ACCESS (often blocked by UIPI / permissions on Win11).
         public const uint PROCESS_QUERY_INFORMATION = 0x0400;
@@ -132,7 +225,15 @@ namespace TrayMirror
 
         public const uint TB_BUTTONCOUNT = 0x0418;
         public const uint TB_GETBUTTON = 0x0417;
+        public const uint TB_GETBUTTONTEXTW = 0x044B;
         public const uint TB_GETIMAGELIST = 0x0431;
+        public const uint TB_GETRECT = 0x0433;
+
+        public const uint INPUT_MOUSE = 0;
+        public const uint MOUSEEVENTF_MOVE = 0x0001;
+        public const uint MOUSEEVENTF_LEFTDOWN = 0x0002;
+        public const uint MOUSEEVENTF_LEFTUP = 0x0004;
+        public const uint MOUSEEVENTF_ABSOLUTE = 0x8000;
 
         public const uint WM_LBUTTONDOWN = 0x0201;
 
@@ -171,6 +272,81 @@ namespace TrayMirror
         public struct POINT
         {
             public int X, Y;
+        }
+
+        // SendInput 结构体
+        [StructLayout(LayoutKind.Sequential)]
+        public struct MOUSEINPUT
+        {
+            public int dx;
+            public int dy;
+            public uint mouseData;
+            public uint dwFlags;
+            public uint time;
+            public IntPtr dwExtraInfo;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        public struct KEYBDINPUT
+        {
+            public ushort wVk;
+            public ushort wScan;
+            public uint dwFlags;
+            public uint time;
+            public IntPtr dwExtraInfo;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        public struct HARDWAREINPUT
+        {
+            public uint uMsg;
+            public ushort wParamL;
+            public ushort wParamH;
+        }
+
+        [StructLayout(LayoutKind.Explicit)]
+        public struct INPUT
+        {
+            [FieldOffset(0)] public uint type;
+            [FieldOffset(4)] public MOUSEINPUT mi;
+            [FieldOffset(4)] public KEYBDINPUT ki;
+            [FieldOffset(4)] public HARDWAREINPUT hi;
+        }
+
+        /// <summary>
+        /// 用 SendInput 在屏幕坐标 (x,y) 模拟鼠标左键点击，然后恢复光标位置。
+        /// </summary>
+        public static void ClickAt(int targetX, int targetY, int restoreX, int restoreY)
+        {
+            var vs = System.Windows.Forms.SystemInformation.VirtualScreen;
+            int vw = vs.Width;
+            int vh = vs.Height;
+
+            // 归一化到 0-65535（MOUSEEVENTF_ABSOLUTE 要求）
+            int normX = (int)((long)targetX * 65535 / vw);
+            int normY = (int)((long)targetY * 65535 / vh);
+            int normRestoreX = (int)((long)restoreX * 65535 / vw);
+            int normRestoreY = (int)((long)restoreY * 65535 / vh);
+
+            var inputs = new INPUT[4];
+
+            inputs[0].type = INPUT_MOUSE;
+            inputs[0].mi.dwFlags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE;
+            inputs[0].mi.dx = normX;
+            inputs[0].mi.dy = normY;
+
+            inputs[1].type = INPUT_MOUSE;
+            inputs[1].mi.dwFlags = MOUSEEVENTF_LEFTDOWN;
+
+            inputs[2].type = INPUT_MOUSE;
+            inputs[2].mi.dwFlags = MOUSEEVENTF_LEFTUP;
+
+            inputs[3].type = INPUT_MOUSE;
+            inputs[3].mi.dwFlags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE;
+            inputs[3].mi.dx = normRestoreX;
+            inputs[3].mi.dy = normRestoreY;
+
+            SendInput(4, inputs, Marshal.SizeOf<INPUT>());
         }
 
         // TBBUTTON 结构（32/64 bit 通用布局）

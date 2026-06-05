@@ -122,6 +122,7 @@ namespace TrayMirror
                             Index = i,
                             CommandId = btn.idCommand,
                             IsVisible = (btn.fsState & 0x08) == 0,
+                            Tooltip = TryReadToolbarButtonText(toolbar, hProcess, btn.idCommand),
                         };
 
                         info.Icon = TryExtractToolbarIcon(imageList, btn)
@@ -225,6 +226,48 @@ namespace TrayMirror
             finally
             {
                 NativeMethods.DestroyIcon(rawIcon);
+            }
+        }
+
+        private static string TryReadToolbarButtonText(IntPtr toolbar, IntPtr hProcess, int commandId)
+        {
+            const int bufferBytes = 512;
+            IntPtr remoteTextPtr = NativeMethods.VirtualAllocEx(
+                hProcess,
+                IntPtr.Zero,
+                bufferBytes,
+                NativeMethods.MEM_COMMIT,
+                NativeMethods.PAGE_READWRITE);
+
+            if (remoteTextPtr == IntPtr.Zero)
+                return string.Empty;
+
+            try
+            {
+                var length = NativeMethods.SendMessage(
+                    toolbar,
+                    NativeMethods.TB_GETBUTTONTEXTW,
+                    new IntPtr(commandId),
+                    remoteTextPtr);
+
+                if (length.ToInt64() < 0)
+                    return string.Empty;
+
+                var buffer = new byte[bufferBytes];
+                if (!NativeMethods.ReadProcessMemory(hProcess, remoteTextPtr, buffer, bufferBytes, out _))
+                    return string.Empty;
+
+                string text = System.Text.Encoding.Unicode.GetString(buffer);
+                int terminator = text.IndexOf('\0');
+                return terminator >= 0 ? text[..terminator].Trim() : text.Trim();
+            }
+            catch
+            {
+                return string.Empty;
+            }
+            finally
+            {
+                NativeMethods.VirtualFreeEx(hProcess, remoteTextPtr, 0, NativeMethods.MEM_RELEASE);
             }
         }
 

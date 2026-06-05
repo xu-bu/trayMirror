@@ -11,6 +11,7 @@ namespace TrayMirror
         [STAThread]
         static void Main()
         {
+            Application.SetHighDpiMode(HighDpiMode.PerMonitorV2);
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
             StartupRegistration.EnsureRegistered();
@@ -35,8 +36,11 @@ namespace TrayMirror
             // 选取非主屏（可扩展为多副屏）
             var secondaryScreens = screens.Where(s => !s.Primary).ToArray();
 
+            // ManagedShell 托盘服务（用于可靠的点击转发）
+            using var managedShell = new ManagedShellTrayService();
+
             // 为每个副屏创建一个 OverlayForm
-            var overlays = secondaryScreens.Select(s => new OverlayForm(s)).ToList();
+            var overlays = secondaryScreens.Select(s => new OverlayForm(s, managedShell)).ToList();
             overlays.ForEach(f => f.Show());
 
             // 系统托盘图标（右键可退出）

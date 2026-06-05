@@ -9,4 +9,7 @@
     <AssemblyName>TrayMirror</AssemblyName>
     <RootNamespace>TrayMirror</RootNamespace>
   </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="ManagedShell" Version="0.0.337" />
+  </ItemGroup>
 </Project>
