@@ -10,7 +10,6 @@ namespace TrayMirror
     public class OverlayForm : Form
     {
         private const int IconSize = 18;
-        private const int IconMargin = 6;
         private const int BarHeight = 32;
         private const int MarginRight = 8;
         private const int MarginBottom = 4;
@@ -49,7 +48,7 @@ namespace TrayMirror
 
         public void PositionOverlay()
         {
-            int width = IconMargin * 2 + IconSize;
+            int width = IconSize;
             var bounds = _targetScreen.Bounds;
             var workingArea = _targetScreen.WorkingArea;
 
@@ -84,7 +83,7 @@ namespace TrayMirror
             base.OnPaint(e);
 
             var g = e.Graphics;
-            _iconRect = new Rectangle(IconMargin, (BarHeight - IconSize) / 2, IconSize, IconSize);
+            _iconRect = new Rectangle(0, (BarHeight - IconSize) / 2, IconSize, IconSize);
 
             using var bgBrush = new SolidBrush(Color.FromArgb(32, 32, 32));
             g.FillRectangle(bgBrush, ClientRectangle);
