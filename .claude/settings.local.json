@@ -3,7 +3,10 @@
     "allow": [
       "Bash(dotnet build:*)",
       "WebSearch",
-      "WebFetch(domain:github.com)"
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "WebFetch(domain:docs.rs)",
+      "Bash(tar -xf cv-src.tar.gz)"
     ]
   }
 }

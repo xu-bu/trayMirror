@@ -1,31 +1,21 @@
 # TrayMirror — 副屏托盘镜像工具
 
-Mirrors system tray icons for specific apps (WeChat, Everything, v2rayN) onto secondary monitors as a floating overlay bar.
+在副屏右下角显示模拟托盘条，镜像主屏托盘应用的图标；点击图标 = 激活/隐藏对应应用窗口。
 
-## Architecture
+## 关键经验（改代码前必读）
 
-| File | Responsibility |
-|---|---|
-| Program.cs | Entry point, multi-screen instantiation, system tray icon |
-| OverlayForm.cs | Secondary screen overlay (drawing icons, mouse click handling, acrylic backdrop) |
-| ManagedShellTrayService.cs | ManagedShell wrapper — tray icon discovery + click forwarding via `IconMouseDown/Up` |
-| MirroredAppTracker.cs | Process detection, icon extraction, **window activation** (fallback) |
-| TrayIconReader.cs | Tray icon reading (ToolbarWindow32 + UIA fallback for Win11) — **legacy, kept as fallback** |
-| UiAutomationTrayReader.cs | Win11 compatibility layer |
-| TrayWatcher.cs | WinEvent hooks for tray change detection |
-| NativeMethods.cs | Win32 P/Invoke wrappers (DWM, SendInput, etc.) |
+### 1. Tauri 应用的窗口显示（clash 等）
 
-## Key design details
+跨进程 Win32 ShowWindow/SetWindowPos 对 Tauri 应用**无效**（窗口显示逻辑在应用内部）。
+正解：向该进程的 `tray_icon_app` 窗口发 `SendMessage(hwnd, 6002, 0, 0x201)`（6002=WM_USER_TRAYICON，0x201=WM_LBUTTONDOWN，lParam 低字，必须是 Down 不是 Up）。已集成于 `MirroredAppTracker.TryShowTauriAppViaTrayClick`。详见 [docs/tauri-window-show.md](docs/tauri-window-show.md)。
 
-- Overlay uses `WS_EX_NOACTIVATE` + `WS_EX_TOPMOST` to avoid stealing focus, plus `TransparencyKey = Fuchsia` for a transparent background that shows only icons
-- **Click forwarding**: ManagedShell's `NotifyIcon.IconMouseDown/Up` properly dispatches tray callbacks to the target app. Falls back to window activation if ManagedShell icon not found.
-- **Background**: Color-key transparency (`TransparencyKey = Fuchsia`) — icons float on a completely transparent window. Dark pill-shaped backgrounds drawn behind each icon for visibility against any wallpaper.
-- Tray icons are read via cross-process memory (ToolbarWindow32) with UIA fallback — **ManagedShell is the primary click path, old TrayIconReader is kept for display**
-- Supports multiple secondary screens — one OverlayForm per screen
-- .NET 6, Windows 10/11 only
+### 2. 禁止 SendInput 注入修饰键（右键卡住教训）
 
-## Build
+2026-08-14 定位的严重 bug：`SendInput` 注入 Ctrl/Alt/Shift/Win 的 KEYUP 会触发系统输入钩子，把右键状态卡在 DOWN，导致任务栏点击/右键全部失灵。**永远不要用 SendInput 注入修饰键**（b9c846a 曾引入此代码，已移除）。
 
-```
-dotnet build -c Release
-```
+## 架构要点
+
+- `OverlayForm`：透明置顶 overlay，1 秒 timer → `SyncIcons()`（从注册表重新发现图标）+ `UpdateIconStates()`（刷新运行态）
+- 图标来源：Win11 托盘注册表读取（`TrayIconReader`），非 ToolbarWindow32（Win11 24H2 无此窗口）
+- 点击激活：`MirroredAppTracker.Activate` → 普通应用走 ToggleAppWindow（ShowWindow 切换），Tauri 应用走 tray 点击消息
+- 日志：`Utils.TraceLog` → `%LOCALAPPDATA%\TrayMirror\traymirror.log`

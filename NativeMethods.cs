@@ -6,6 +6,29 @@ namespace TrayMirror
 {
     internal static class NativeMethods
     {
+        [DllImport("shell32.dll", CharSet = CharSet.Unicode, ExactSpelling = true)]
+        public static extern int SHGetKnownFolderPath(
+            [MarshalAs(UnmanagedType.LPStruct)] Guid rfid,
+            uint dwFlags,
+            IntPtr hToken,
+            out IntPtr pszPath);
+
+        public static string? GetKnownFolderPath(Guid folderId)
+        {
+            if (SHGetKnownFolderPath(folderId, 0, IntPtr.Zero, out IntPtr pszPath) != 0)
+                return null;
+
+            try
+            {
+                return Marshal.PtrToStringUni(pszPath);
+            }
+            finally
+            {
+                if (pszPath != IntPtr.Zero)
+                    Marshal.FreeCoTaskMem(pszPath);
+            }
+        }
+
         // ── 窗口查找 ────────────────────────────────────────────────
         [DllImport("user32.dll", SetLastError = true)]
         public static extern IntPtr FindWindow(string? lpClassName, string? lpWindowName);
@@ -17,6 +40,39 @@ namespace TrayMirror
         // ── 窗口信息 ────────────────────────────────────────────────
         [DllImport("user32.dll", SetLastError = true)]
         public static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
+
+        [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+        public static extern bool QueryFullProcessImageName(
+            IntPtr hProcess,
+            int dwFlags,
+            StringBuilder lpExeName,
+            ref int lpdwSize);
+
+        public static string? GetProcessImagePath(int processId)
+        {
+            IntPtr hProcess = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, (uint)processId);
+            if (hProcess == IntPtr.Zero)
+                return null;
+
+            try
+            {
+                var buffer = new StringBuilder(1024);
+                int size = buffer.Capacity;
+                return QueryFullProcessImageName(hProcess, 0, buffer, ref size)
+                    ? buffer.ToString()
+                    : null;
+            }
+            finally
+            {
+                CloseHandle(hProcess);
+            }
+        }
+
+        [DllImport("user32.dll")]
+        public static extern bool SetFocus(IntPtr hWnd);
+
+        [DllImport("user32.dll")]
+        public static extern bool AllowSetForegroundWindow(int dwProcessId);
 
         [DllImport("user32.dll")]
         public static extern bool IsWindowVisible(IntPtr hWnd);
@@ -92,6 +148,37 @@ namespace TrayMirror
         [DllImport("user32.dll")]
         public static extern IntPtr CopyIcon(IntPtr hIcon);
 
+        [DllImport("user32.dll", SetLastError = true)]
+        public static extern IntPtr GetClassLongPtr(IntPtr hWnd, int nIndex);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        public static extern IntPtr GetClassLong(IntPtr hWnd, int nIndex);
+
+        public const int GCL_HICON = -14;
+        public const int GCL_HICONSM = -34;
+        public const uint WM_GETICON = 0x007F;
+        public const uint ICON_BIG = 1;
+        public const uint ICON_SMALL = 0;
+        public const uint ICON_SMALL2 = 2;
+
+        public static IntPtr GetWindowIcon(IntPtr hWnd)
+        {
+            // Try to get the window icon using WM_GETICON message
+            IntPtr hIcon = SendMessage(hWnd, WM_GETICON, (IntPtr)ICON_BIG, IntPtr.Zero);
+            if (hIcon != IntPtr.Zero)
+                return hIcon;
+
+            hIcon = SendMessage(hWnd, WM_GETICON, (IntPtr)ICON_SMALL, IntPtr.Zero);
+            if (hIcon != IntPtr.Zero)
+                return hIcon;
+
+            hIcon = SendMessage(hWnd, WM_GETICON, (IntPtr)ICON_SMALL2, IntPtr.Zero);
+            if (hIcon != IntPtr.Zero)
+                return hIcon;
+
+            return IntPtr.Zero;
+        }
+
         [DllImport("comctl32.dll", SetLastError = true)]
         public static extern IntPtr ImageList_GetIcon(IntPtr himl, int i, uint flags);
 
@@ -150,6 +237,12 @@ namespace TrayMirror
 
         [DllImport("user32.dll")]
         public static extern bool ShowWindowAsync(IntPtr hWnd, int nCmdShow);
+
+        [DllImport("user32.dll")]
+        public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+
+        [DllImport("user32.dll")]
+        public static extern void SwitchToThisWindow(IntPtr hWnd, bool fAltTab);
 
         [DllImport("user32.dll")]
         public static extern bool SetForegroundWindow(IntPtr hWnd);
@@ -254,9 +347,26 @@ namespace TrayMirror
         public static readonly IntPtr HWND_TOPMOST = new(-1);
 
         public const uint SWP_NOACTIVATE = 0x0010;
+        public const uint SWP_NOZORDER = 0x0004;
+        public const uint SWP_NOMOVE = 0x0002;
+        public const uint SWP_NOSIZE = 0x0001;
         public const uint SWP_SHOWWINDOW = 0x0040;
+        public const int SW_HIDE = 0;
+        public const int SW_SHOWNORMAL = 1;
+        public const int SW_MINIMIZE = 6;
         public const int SW_RESTORE = 9;
         public const int SW_SHOW = 5;
+
+        public const uint WM_COMMAND = 0x0111;
+        public const uint WM_ACTIVATE = 0x0006;
+        public const uint WM_SYSCOMMAND = 0x0112;
+        public const int WA_ACTIVE = 1;
+        public const int SC_RESTORE = 0xF120;
+
+        public const int ASFW_ANY = -1;
+
+        public static readonly IntPtr HWND_TOP = IntPtr.Zero;
+        public static readonly IntPtr HWND_NOTOPMOST = new(-2);
 
 
         // ── 结构体 ──────────────────────────────────────────────────

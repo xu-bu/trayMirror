@@ -9,31 +9,43 @@ namespace TrayMirror
     /// <summary>
     /// Shows mirrored launcher icons on the secondary display when supported apps are running.
     /// </summary>
-    public class OverlayForm : Form
+    public class Overlay : Form
     {
-        private const int IconSize = 20;
-        private const int IconMargin = 6;
-        private const int BarHeight = 32;
+        private const int IconWidth = 60;
+        private const int OverlayHeight = 60;
         private const int HardcodedRightAnchorOffset = 158;
-        private const int HardcodedTopOffsetFromBottom = 76;
+        private const int overlayBottomMargin = 65;
+        private const int HoverOffset = 8;
         private const int WS_EX_TOPMOST = 0x00000008;
         private const int WS_EX_TOOLWINDOW = 0x00000080;
         private const int WS_EX_NOACTIVATE = 0x08000000;
+        private const int WM_NCHITTEST = 0x0084;
+        private const int HTCLIENT = 1;
+        private const int HTTRANSPARENT = -1;
 
-        private readonly System.Windows.Forms.Timer _pollTimer = new();
         private readonly MirroredAppTracker _tracker = new();
-        private readonly TrayIconReader _trayIconReader = new();
-        private readonly ManagedShellTrayService _managedShell;
         private readonly Screen _targetScreen;
-        private readonly MirroredIconState[] _icons = MirroredAppTracker.DefaultApps
-            .Select(app => new MirroredIconState(app))
-            .ToArray();
+        private readonly List<MirroredIconDefinition> _icons = new();
+        private readonly System.Windows.Forms.Timer _updateTimer;
+        private MirroredIconDefinition? _hoveredIcon;
+        private float _hoverAnimationProgress;
 
-        public OverlayForm(Screen targetScreen, ManagedShellTrayService managedShell)
+        public Overlay(Screen targetScreen)
         {
-            _managedShell = managedShell;
+            // to know which screen is secondary screen
             _targetScreen = targetScreen;
+            using var reader = new TrayIconReader();
+            _icons.AddRange(reader.ReadIcons());
 
+            // Setup update timer for real-time sync
+            _updateTimer = new System.Windows.Forms.Timer
+            {
+                Interval = 1000 // Update every 1 second
+            };
+            _updateTimer.Tick += OnUpdateTimerTick;
+            _updateTimer.Start();
+
+            StartPosition = FormStartPosition.Manual;
             FormBorderStyle = FormBorderStyle.None;
             TopMost = true;
             ShowInTaskbar = false;
@@ -42,19 +54,20 @@ namespace TrayMirror
             DoubleBuffered = true;
 
             MouseClick += OnMouseClick;
-            MouseMove += (_, _) => Cursor = FindIconAt(PointToClient(Cursor.Position)) != null
-                ? Cursors.Hand
-                : Cursors.Default;
-
-            _pollTimer.Interval = 1500;
-            _pollTimer.Tick += (_, _) => SafeRefreshMirroredAppStates();
-            _pollTimer.Start();
-
-            SafeRefreshMirroredAppStates();
+            MouseMove += OnMouseMove;
+            MouseLeave += (sender, e) =>
+            {
+                _hoveredIcon = null;
+                _hoverAnimationProgress = 0f;
+                Invalidate();
+            };
+            CreateHandle();
         }
 
+        // prevent tray mirror stealing key board focus
         protected override bool ShowWithoutActivation => true;
 
+        // make sure no matter where you click, tray mirror is always on top of screen
         protected override CreateParams CreateParams
         {
             get
@@ -65,32 +78,52 @@ namespace TrayMirror
             }
         }
 
+        // 非图标区域对鼠标事件完全穿透（HTTRANSPARENT）：
+        // 右键/左键/移动全部直达下层窗口，覆盖层永远截不走任务栏的鼠标事件。
+        protected override void WndProc(ref Message m)
+        {
+            if (m.Msg == WM_NCHITTEST)
+            {
+                int x = unchecked((short)(int)m.LParam);
+                int y = unchecked((short)((int)m.LParam >> 16));
+                if (FindIconAt(PointToClient(new Point(x, y))) == null)
+                {
+                    m.Result = (IntPtr)HTTRANSPARENT;
+                    return;
+                }
+            }
+
+            base.WndProc(ref m);
+        }
+
+        // this func only draws overlay but not the icons inside
         public void PositionOverlay()
         {
-            int runningCount = Math.Max(1, _icons.Count(i => i.IsRunning));
-            int width = IconMargin * 2 + IconSize * runningCount + IconMargin * (runningCount - 1);
+            int runningCount = Math.Max(1, _icons.Count(i => i.Icon != null));
+            int width = IconWidth * runningCount;
             var bounds = _targetScreen.Bounds;
 
             int rightAnchor = bounds.Right - HardcodedRightAnchorOffset;
             int x = rightAnchor - width;
-            int y = bounds.Bottom - HardcodedTopOffsetFromBottom;
+            int y = bounds.Bottom - overlayBottomMargin;
 
-            Location = new Point(x, y);
-            Size = new Size(width, BarHeight);
+            // Use SetWindowPos for reliable multi-monitor positioning
+            NativeMethods.SetWindowPos(
+                Handle,
+                IntPtr.Zero,
+                x, y, width, OverlayHeight,
+                NativeMethods.SWP_NOZORDER | NativeMethods.SWP_NOACTIVATE);
+
+            Size = new Size(width, OverlayHeight);
             UpdateIconBounds();
-            Region = new Region(new RectangleF(0, 0, width, BarHeight));
-
-            if (IsHandleCreated)
-            {
-                ForceOverlayToTop(x, y, width, BarHeight);
-            }
+            Region = new Region(new RectangleF(0, 0, width, OverlayHeight));
         }
 
         protected override void OnPaintBackground(PaintEventArgs e)
         {
             // 不绘制任何背景 — TransparencyKey 处理透明度
         }
-
+        // draw icons
         protected override void OnPaint(PaintEventArgs e)
         {
             base.OnPaint(e);
@@ -99,108 +132,26 @@ namespace TrayMirror
 
             // 为每个图标绘制微妙的圆形背景（提升在亮色/暗色桌面上的可见度）
             using var iconBgBrush = new SolidBrush(Color.FromArgb(38, 38, 38));
-            foreach (var iconState in _icons.Where(i => i.IsRunning))
+            foreach (var icon in _icons.Where(i => i.Icon != null))
             {
+                int yOffset = (icon == _hoveredIcon) ? (int)(HoverOffset * _hoverAnimationProgress) : 0;
                 var bgRect = new Rectangle(
-                    iconState.Bounds.X - 1, iconState.Bounds.Y - 1,
-                    iconState.Bounds.Width + 2, iconState.Bounds.Height + 2);
+                    icon.Bounds.X - 1, icon.Bounds.Y - 1 - yOffset,
+                    icon.Bounds.Width + 2, icon.Bounds.Height + 2);
                 g.FillRectangle(iconBgBrush, bgRect);
             }
 
             // 绘制图标
-            foreach (var iconState in _icons.Where(i => i.IsRunning))
+            foreach (var icon in _icons.Where(i => i.Icon != null))
             {
-                var icon = iconState.Icon ?? SystemIcons.Application;
-                g.DrawIcon(icon, iconState.Bounds);
+                int yOffset = (icon == _hoveredIcon) ? (int)(HoverOffset * _hoverAnimationProgress) : 0;
+                var drawBounds = new Rectangle(
+                    icon.Bounds.X, icon.Bounds.Y - yOffset,
+                    icon.Bounds.Width, icon.Bounds.Height);
+                g.DrawIcon(icon.Icon ?? SystemIcons.Application, drawBounds);
             }
         }
 
-        protected override void OnHandleCreated(EventArgs e)
-        {
-            base.OnHandleCreated(e);
-
-            Region = new Region(new RectangleF(0, 0, Width, BarHeight));
-            PositionOverlay();
-        }
-
-        protected override void Dispose(bool disposing)
-        {
-            if (disposing)
-            {
-                _pollTimer.Dispose();
-                _tracker.Dispose();
-                _trayIconReader.Dispose();
-                foreach (var icon in _icons)
-                    icon.Dispose();
-            }
-
-            base.Dispose(disposing);
-        }
-
-        private void SafeRefreshMirroredAppStates()
-        {
-            try
-            {
-                RefreshMirroredAppStates();
-            }
-            catch
-            {
-                if (_icons.Any(i => i.IsRunning))
-                {
-                    PositionOverlay();
-                    if (!Visible)
-                        Show();
-                }
-            }
-        }
-
-        private void RefreshMirroredAppStates()
-        {
-            bool stateChanged = false;
-            var trayIcons = TryReadTrayIcons();
-
-            try
-            {
-                foreach (var iconState in _icons)
-                {
-                    var state = _tracker.GetState(iconState.App, TryFindTrayIcon(trayIcons, iconState.App));
-                    bool runningChanged = iconState.IsRunning != state.IsRunning;
-                    bool iconChanged = !string.Equals(iconState.IconSourcePath, state.IconSourcePath, StringComparison.OrdinalIgnoreCase);
-
-                    iconState.IsRunning = state.IsRunning;
-                    iconState.IconSourcePath = state.IconSourcePath;
-                    iconState.ProcessId = state.ProcessId;
-
-                    if (iconChanged)
-                        iconState.ReplaceIcon(state.Icon);
-                    else
-                        state.Icon?.Dispose();
-
-                    stateChanged |= runningChanged || iconChanged;
-                }
-            }
-            finally
-            {
-                foreach (var icon in trayIcons)
-                    icon.Dispose();
-            }
-
-            if (_icons.Any(i => i.IsRunning))
-            {
-                PositionOverlay();
-                if (!Visible)
-                    Show();
-            }
-            else if (Visible)
-            {
-                Hide();
-            }
-
-            if (stateChanged)
-                Invalidate();
-            else if (_icons.Any(i => i.IsRunning))
-                ForceOverlayToTop(Left, Top, Width, Height);
-        }
 
         private void ForceOverlayToTop(int x, int y, int width, int height)
         {
@@ -216,6 +167,31 @@ namespace TrayMirror
             Invalidate();
         }
 
+        private void OnMouseMove(object? sender, MouseEventArgs e)
+        {
+            var icon = FindIconAt(e.Location);
+            if (icon != _hoveredIcon)
+            {
+                _hoveredIcon = icon;
+                _hoverAnimationProgress = icon != null ? 0f : 1f;
+                Invalidate();
+            }
+
+            Cursor = icon != null ? Cursors.Hand : Cursors.Default;
+
+            // Animate hover effect
+            if (_hoveredIcon != null && _hoverAnimationProgress < 1f)
+            {
+                _hoverAnimationProgress = Math.Min(1f, _hoverAnimationProgress + 0.15f);
+                Invalidate();
+            }
+            else if (_hoveredIcon == null && _hoverAnimationProgress > 0f)
+            {
+                _hoverAnimationProgress = Math.Max(0f, _hoverAnimationProgress - 0.15f);
+                Invalidate();
+            }
+        }
+
         private void OnMouseClick(object? sender, MouseEventArgs e)
         {
             if (e.Button != MouseButtons.Left)
@@ -225,119 +201,118 @@ namespace TrayMirror
             if (icon == null)
                 return;
 
-            // 优先：通过 ManagedShell 转发点击到真实托盘图标
-            var mIcon = _managedShell.FindIconByKeywords(icon.App.TrayTooltipKeywords);
-            if (mIcon != null)
-            {
-                var screenPt = PointToScreen(e.Location);
-                _managedShell.ForwardClick(mIcon, screenPt.X, screenPt.Y);
-                return;
-            }
-
-            // 回退：直接激活窗口
-            _tracker.Activate(icon.App);
+            Utils.TraceLog($"Overlay click: {icon.DisplayName} at ({e.X},{e.Y})");
+            _tracker.Activate(icon);
         }
 
-        private MirroredIconState? FindIconAt(Point location)
+        private MirroredIconDefinition? FindIconAt(Point location)
         {
-            return _icons.FirstOrDefault(icon => icon.IsRunning && icon.Bounds.Contains(location));
+            return _icons.FirstOrDefault(icon => icon.Icon != null && icon.Bounds.Contains(location));
         }
 
         private void UpdateIconBounds()
         {
-            int x = Width - IconMargin - IconSize;
-            foreach (var iconState in _icons)
+            int x = Width - IconWidth;
+            foreach (var icon in _icons)
             {
-                if (!iconState.IsRunning)
+                if (icon.Icon == null)
                 {
-                    iconState.Bounds = Rectangle.Empty;
+                    icon.Bounds = Rectangle.Empty;
                     continue;
                 }
 
-                iconState.Bounds = new Rectangle(x, (BarHeight - IconSize) / 2, IconSize, IconSize);
-                x -= IconSize + IconMargin;
+                icon.Bounds = new Rectangle(x, 0, IconWidth, OverlayHeight);
+                x -= IconWidth;
             }
         }
 
-        private List<TrayIconInfo> TryReadTrayIcons()
+        /// <summary>
+        /// Re-discover tray apps so apps started after TrayMirror appear on the overlay,
+        /// and apps that exited disappear.
+        /// </summary>
+        private void SyncIcons()
         {
+            MirroredIconDefinition[] latest;
             try
             {
-                return _trayIconReader.ReadIcons();
+                using var reader = new TrayIconReader();
+                latest = reader.ReadIcons();
             }
             catch
             {
-                return new List<TrayIconInfo>();
-            }
-        }
-
-        private static Icon? TryFindTrayIcon(List<TrayIconInfo> trayIcons, MirroredAppDefinition app)
-        {
-            var match = trayIcons
-                .Where(icon => icon.IsVisible && icon.Icon != null)
-                .FirstOrDefault(icon => app.TrayTooltipKeywords.Any(keyword =>
-                    icon.Tooltip.Contains(keyword, StringComparison.OrdinalIgnoreCase)));
-
-            return match?.Icon == null ? null : (Icon)match.Icon.Clone();
-        }
-
-        private sealed class MirroredIconState : IDisposable
-        {
-            public MirroredIconState(MirroredAppDefinition app)
-            {
-                App = app;
+                return; // keep last known state on reader failure
             }
 
-            public MirroredAppDefinition App { get; }
-            public bool IsRunning { get; set; }
-            public int ProcessId { get; set; }
-            public string? IconSourcePath { get; set; }
-            public Icon? Icon { get; private set; }
-            public Rectangle Bounds { get; set; }
+            var latestKeys = latest.Select(GetIconKey).ToHashSet(StringComparer.OrdinalIgnoreCase);
+            var existingKeys = _icons.Select(GetIconKey).ToHashSet(StringComparer.OrdinalIgnoreCase);
 
-            public void ReplaceIcon(Icon? icon)
+            for (int i = _icons.Count - 1; i >= 0; i--)
             {
-                Icon?.Dispose();
-                Icon = icon;
-            }
-
-            public void Dispose()
-            {
-                Icon?.Dispose();
-            }
-        }
-
-        private static Rectangle? TryFindTaskbarBounds(Rectangle targetScreenBounds, bool targetIsPrimary)
-        {
-            Rectangle? best = null;
-            int bestArea = 0;
-            var className = new System.Text.StringBuilder(256);
-
-            NativeMethods.EnumWindows((hwnd, _) =>
-            {
-                className.Clear();
-                NativeMethods.GetClassName(hwnd, className, className.Capacity);
-                string name = className.ToString();
-                string wantedClass = targetIsPrimary ? "Shell_TrayWnd" : "Shell_SecondaryTrayWnd";
-                if (!string.Equals(name, wantedClass, StringComparison.Ordinal))
-                    return true;
-
-                if (!NativeMethods.GetWindowRect(hwnd, out var rect))
-                    return true;
-
-                var taskbar = Rectangle.FromLTRB(rect.Left, rect.Top, rect.Right, rect.Bottom);
-                var intersection = Rectangle.Intersect(targetScreenBounds, taskbar);
-                int area = intersection.Width * intersection.Height;
-                if (area > bestArea)
+                if (!latestKeys.Contains(GetIconKey(_icons[i])))
                 {
-                    best = taskbar;
-                    bestArea = area;
+                    _icons[i].Icon?.Dispose();
+                    _icons.RemoveAt(i);
+                }
+            }
+
+            foreach (var icon in latest)
+            {
+                if (!existingKeys.Contains(GetIconKey(icon)))
+                    _icons.Add(icon);
+            }
+        }
+
+        private static string GetIconKey(MirroredIconDefinition icon) =>
+            string.Join("|", icon.CandidateProcessNames);
+
+        private void OnUpdateTimerTick(object? sender, EventArgs e)
+        {
+            _updateTimer.Stop();
+
+            try
+            {
+                var previousStates = _icons.Select(icon => icon.Icon != null).ToArray();
+
+                SyncIcons();
+                _tracker.UpdateIconStates(_icons);
+
+                bool needsRepaint = previousStates.Length != _icons.Count;
+                if (!needsRepaint)
+                {
+                    for (int i = 0; i < _icons.Count; i++)
+                    {
+                        if (previousStates[i] != (_icons[i].Icon != null))
+                        {
+                            needsRepaint = true;
+                            break;
+                        }
+                    }
                 }
 
-                return true;
-            }, IntPtr.Zero);
+                if (needsRepaint)
+                {
+                    PositionOverlay();
+                    Invalidate();
+                }
+            }
+            finally
+            {
+                _updateTimer.Start();
+            }
+        }
 
-            return best;
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing)
+            {
+                _updateTimer?.Stop();
+                _updateTimer?.Dispose();
+                foreach (var icon in _icons)
+                {
+                    icon.Icon?.Dispose();
+                }
+            }
+            base.Dispose(disposing);
         }
     }
 }

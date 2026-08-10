@@ -1,9 +1,3 @@
-using System;
-using System.Drawing;
-using System.Linq;
-using System.Windows.Forms;
-
-
 namespace TrayMirror
 {
     internal static class Program
@@ -16,9 +10,14 @@ namespace TrayMirror
             Application.SetCompatibleTextRenderingDefault(false);
             StartupRegistration.EnsureRegistered();
 
-            // 防止重复启动
-            using var mutex = new System.Threading.Mutex(true, "TrayMirror_SingleInstance", out bool isNew);
-            if (!isNew)
+            // 注意：不要调用 ReleaseStuckModifierKeys()（b9c846a 引入）。
+            // 它用 SendInput 注入修饰键 KEYUP，会触发系统输入钩子把右键状态卡为
+            // DOWN，导致任务栏按钮点击/右键全部失灵（2026-08-14 已定位并复现）。
+
+            // when first run this program, it will get the mutex as true
+            // then the second run try to get the mutex, it will get false
+            using var mutex = new Mutex(true, "TrayMirror_SingleInstance", out bool haveMutex);
+            if (!haveMutex)
             {
                 MessageBox.Show("TrayMirror 已在运行中。", "TrayMirror",
                     MessageBoxButtons.OK, MessageBoxIcon.Information);
@@ -35,22 +34,23 @@ namespace TrayMirror
 
             // 选取非主屏（可扩展为多副屏）
             var secondaryScreens = screens.Where(s => !s.Primary).ToArray();
-
-            // ManagedShell 托盘服务（用于可靠的点击转发）
-            using var managedShell = new ManagedShellTrayService();
+            var overlays = secondaryScreens.Select(s => new Overlay(s)).ToList();
 
             // 为每个副屏创建一个 OverlayForm
-            var overlays = secondaryScreens.Select(s => new OverlayForm(s, managedShell)).ToList();
-            overlays.ForEach(f => f.Show());
+            overlays.ForEach(f =>
+            {
+                f.PositionOverlay();
+                f.Show();
+            });
 
             // 系统托盘图标（右键可退出）
-            using var trayIcon = BuildTrayIcon(overlays);
+
             Application.Run();
 
             overlays.ForEach(f => f.Dispose());
         }
 
-        private static NotifyIcon BuildTrayIcon(System.Collections.Generic.List<OverlayForm> overlays)
+        private static NotifyIcon BuildTrayIcon(System.Collections.Generic.List<Overlay> overlays)
         {
             var menu = new ContextMenuStrip();
             menu.Items.Add("重新定位副屏覆盖层", null, (_, _) =>
