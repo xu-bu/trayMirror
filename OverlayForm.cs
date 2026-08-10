@@ -10,7 +10,6 @@ namespace TrayMirror
     public class OverlayForm : Form
     {
         private const int IconSize = 18;
-        private const int BarHeight = 32;
         private const int MarginRight = 8;
         private const int MarginBottom = 4;
         private const int LeftShift = 86;
@@ -49,21 +48,22 @@ namespace TrayMirror
         public void PositionOverlay()
         {
             int width = IconSize;
+            int height = IconSize;
             var bounds = _targetScreen.Bounds;
             var workingArea = _targetScreen.WorkingArea;
 
             int x = bounds.Right - width - MarginRight - LeftShift;
-            int y = bounds.Bottom - BarHeight - MarginBottom;
+            int y = bounds.Bottom - height - MarginBottom;
 
             int bottomTaskbarThickness = Math.Max(0, bounds.Bottom - workingArea.Bottom);
             if (bottomTaskbarThickness > 0)
             {
                 x = workingArea.Right - width - MarginRight - LeftShift;
-                y = workingArea.Bottom + Math.Max(0, (bottomTaskbarThickness - BarHeight) / 2);
+                y = workingArea.Bottom + Math.Max(0, (bottomTaskbarThickness - height) / 2);
             }
 
             Location = new Point(x, y);
-            Size = new Size(width, BarHeight);
+            Size = new Size(width, height);
 
             if (IsHandleCreated)
             {
@@ -73,7 +73,7 @@ namespace TrayMirror
                     x,
                     y,
                     width,
-                    BarHeight,
+                    height,
                     NativeMethods.SWP_NOACTIVATE | NativeMethods.SWP_SHOWWINDOW);
             }
         }
@@ -83,7 +83,7 @@ namespace TrayMirror
             base.OnPaint(e);
 
             var g = e.Graphics;
-            _iconRect = new Rectangle(0, (BarHeight - IconSize) / 2, IconSize, IconSize);
+            _iconRect = new Rectangle(0, 0, IconSize, IconSize);
 
             using var bgBrush = new SolidBrush(Color.FromArgb(32, 32, 32));
             g.FillRectangle(bgBrush, ClientRectangle);
@@ -98,7 +98,7 @@ namespace TrayMirror
         protected override void OnHandleCreated(EventArgs e)
         {
             base.OnHandleCreated(e);
-            Region = new Region(new RectangleF(0, 0, Width, BarHeight));
+            Region = new Region(new RectangleF(0, 0, IconSize, IconSize));
             PositionOverlay();
         }
 
