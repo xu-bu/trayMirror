@@ -110,12 +110,13 @@ namespace TrayMirror
 
             Size = new Size(width, OverlayHeight);
             UpdateIconBounds();
-            Region = new Region(new RectangleF(0, 0, width, OverlayHeight));
         }
 
         protected override void OnPaintBackground(PaintEventArgs e)
         {
-            // 不绘制任何背景 — TransparencyKey 处理透明度
+            // 必须用 BackColor(Fuchsia) 真实填充背景，TransparencyKey 才能把该颜色键控为透明。
+            // 空实现会导致客户区未绘制、露出黑色底。
+            e.Graphics.Clear(BackColor);
         }
         // draw icons
         protected override void OnPaint(PaintEventArgs e)
@@ -124,18 +125,7 @@ namespace TrayMirror
 
             var g = e.Graphics;
 
-            // 为每个图标绘制微妙的圆形背景（提升在亮色/暗色桌面上的可见度）
-            using var iconBgBrush = new SolidBrush(Color.FromArgb(38, 38, 38));
-            foreach (var icon in _icons.Where(i => i.Icon != null))
-            {
-                int yOffset = (icon == _hoveredIcon) ? (int)(HoverOffset * _hoverAnimationProgress) : 0;
-                var bgRect = new Rectangle(
-                    icon.Bounds.X - 1, icon.Bounds.Y - 1 - yOffset,
-                    icon.Bounds.Width + 2, icon.Bounds.Height + 2);
-                g.FillRectangle(iconBgBrush, bgRect);
-            }
-
-            // 绘制图标
+            // 绘制图标（不绘制底衬，背景完全透明）
             foreach (var icon in _icons.Where(i => i.Icon != null))
             {
                 int yOffset = (icon == _hoveredIcon) ? (int)(HoverOffset * _hoverAnimationProgress) : 0;
@@ -144,21 +134,6 @@ namespace TrayMirror
                     icon.Bounds.Width, icon.Bounds.Height);
                 g.DrawIcon(icon.Icon ?? SystemIcons.Application, drawBounds);
             }
-        }
-
-
-        private void ForceOverlayToTop(int x, int y, int width, int height)
-        {
-            NativeMethods.SetWindowPos(
-                Handle,
-                NativeMethods.HWND_TOPMOST,
-                x,
-                y,
-                width,
-                height,
-                NativeMethods.SWP_NOACTIVATE | NativeMethods.SWP_SHOWWINDOW);
-
-            Invalidate();
         }
 
         private void OnMouseMove(object? sender, MouseEventArgs e)
