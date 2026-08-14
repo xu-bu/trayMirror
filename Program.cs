@@ -44,6 +44,8 @@ namespace TrayMirror
             });
 
             // 系统托盘图标（右键可退出）
+            // 必须持有引用（using var），否则 NotifyIcon 会被 GC 回收导致图标消失
+            using var trayIcon = BuildTrayIcon(overlays);
 
             Application.Run();
 
