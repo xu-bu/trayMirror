@@ -2,6 +2,8 @@ using System.Runtime.InteropServices;
 using System.Diagnostics;
 using System.IO;
 using Microsoft.Win32;
+using System.Threading;
+using System.Threading.Tasks;
 
 namespace TrayMirror
 {
@@ -246,54 +248,69 @@ namespace TrayMirror
         {
             var apps = new List<MirroredIconDefinition>();
             var seenProcessNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
 
             try
             {
-                foreach (var process in Process.GetProcesses())
+                var task = Task.Run(() =>
                 {
-                    try
+                    foreach (var process in Process.GetProcesses())
                     {
-                        string? processName = process.ProcessName;
-                        if (string.IsNullOrWhiteSpace(processName))
-                            continue;
+                        if (cts.Token.IsCancellationRequested)
+                            break;
 
-                        // Skip system processes and background services
-                        if (ShouldSkipProcess(processName))
-                            continue;
-
-                        // Avoid duplicates
-                        if (!seenProcessNames.Add(processName))
-                            continue;
-
-                        string? exePath = TryGetExecutablePath(process);
-                        if (string.IsNullOrWhiteSpace(exePath))
-                            continue;
-
-                        string displayName = GetDisplayName(processName, exePath);
-                        Icon? icon = TryExtractIcon(exePath);
-                        if (icon == null) continue;
-
-                        var app = new MirroredIconDefinition(
-                            displayName,
-                            new[] { processName },
-                            new[] { displayName, processName })
+                        try
                         {
-                            Icon = icon,
-                            ProcessId = process.Id,
-                            IconSourcePath = exePath
-                        };
+                            string? processName = process.ProcessName;
+                            if (string.IsNullOrWhiteSpace(processName))
+                                continue;
 
-                        apps.Add(app);
+                            // Skip system processes and background services
+                            if (ShouldSkipProcess(processName))
+                                continue;
+
+                            // Avoid duplicates
+                            lock (seenProcessNames)
+                            {
+                                if (!seenProcessNames.Add(processName))
+                                    continue;
+                            }
+
+                            string? exePath = TryGetExecutablePath(process);
+                            if (string.IsNullOrWhiteSpace(exePath))
+                                continue;
+
+                            string displayName = GetDisplayName(processName, exePath);
+                            Icon? icon = TryExtractIcon(exePath);
+                            if (icon == null) continue;
+
+                            var app = new MirroredIconDefinition(
+                                displayName,
+                                new[] { processName },
+                                new[] { displayName, processName })
+                            {
+                                Icon = icon,
+                                ProcessId = process.Id,
+                                IconSourcePath = exePath
+                            };
+
+                            lock (apps)
+                            {
+                                apps.Add(app);
+                            }
+                        }
+                        catch
+                        {
+                            // Skip processes that can't be accessed
+                        }
                     }
-                    catch
-                    {
-                        // Skip processes that can't be accessed
-                    }
-                }
+                }, cts.Token);
+
+                task.Wait(TimeSpan.FromSeconds(5));
             }
             catch
             {
-                // Return empty if process enumeration fails
+                // Return whatever we collected on timeout or error
             }
 
             return apps.ToArray();
@@ -427,31 +444,42 @@ namespace TrayMirror
 
         private static Icon? TryExtractIconFromApp(string appName)
         {
+            var cts = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+
             try
             {
-                // Try to find a process with a matching name
-                foreach (var process in Process.GetProcesses())
+                var task = Task.Run(() =>
                 {
-                    try
+                    // Try to find a process with a matching name
+                    foreach (var process in Process.GetProcesses())
                     {
-                        string? exePath = process.MainModule?.FileName;
-                        if (string.IsNullOrWhiteSpace(exePath)) continue;
+                        if (cts.Token.IsCancellationRequested)
+                            break;
 
-                        string fileName = System.IO.Path.GetFileNameWithoutExtension(exePath);
-                        string processName = process.ProcessName;
-
-                        // Check if process name matches the app name
-                        if (processName.Equals(appName, StringComparison.OrdinalIgnoreCase) ||
-                            fileName.Equals(appName, StringComparison.OrdinalIgnoreCase))
+                        try
                         {
-                            return TryExtractIcon(exePath);
+                            string? exePath = process.MainModule?.FileName;
+                            if (string.IsNullOrWhiteSpace(exePath)) continue;
+
+                            string fileName = System.IO.Path.GetFileNameWithoutExtension(exePath);
+                            string processName = process.ProcessName;
+
+                            // Check if process name matches the app name
+                            if (processName.Equals(appName, StringComparison.OrdinalIgnoreCase) ||
+                                fileName.Equals(appName, StringComparison.OrdinalIgnoreCase))
+                            {
+                                return TryExtractIcon(exePath);
+                            }
+                        }
+                        catch
+                        {
+                            // Skip processes we can't access
                         }
                     }
-                    catch
-                    {
-                        // Skip processes we can't access
-                    }
-                }
+                    return null;
+                }, cts.Token);
+
+                return task.Wait(TimeSpan.FromSeconds(3)) ? task.Result : null;
             }
             catch
             {
@@ -583,8 +611,41 @@ namespace TrayMirror
                     .ToDictionary(group => group.Key, group => group.ToList(), StringComparer.OrdinalIgnoreCase);
             }
 
-            public static ProcessIndex Create() =>
-                new(Process.GetProcesses().Select(ProcessInfo.FromProcess));
+            public static ProcessIndex Create()
+            {
+                // Use a timeout to prevent hanging on first boot when many processes are starting
+                var processes = new List<Process>();
+                var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+
+                try
+                {
+                    var task = Task.Run(() =>
+                    {
+                        foreach (var process in Process.GetProcesses())
+                        {
+                            if (cts.Token.IsCancellationRequested)
+                                break;
+
+                            try
+                            {
+                                processes.Add(process);
+                            }
+                            catch
+                            {
+                                // Skip processes we can't access
+                            }
+                        }
+                    }, cts.Token);
+
+                    task.Wait(TimeSpan.FromSeconds(5));
+                }
+                catch
+                {
+                    // On timeout or error, use whatever processes we collected
+                }
+
+                return new ProcessIndex(processes.Select(ProcessInfo.FromProcess));
+            }
 
             public ProcessInfo? Match(NotifyIconEntry entry)
             {

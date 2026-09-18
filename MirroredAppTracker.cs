@@ -2,6 +2,8 @@ using System.Diagnostics;
 using System.IO;
 using System.Net.Http;
 using System.Text.Json;
+using System.Threading;
+using System.Threading.Tasks;
 
 namespace TrayMirror
 {
@@ -496,32 +498,41 @@ namespace TrayMirror
         private static IReadOnlyList<RunningProcessInfo> SnapshotRunningProcesses(HashSet<string> candidateNames)
         {
             var matches = new List<RunningProcessInfo>();
+            var cts = new CancellationTokenSource(TimeSpan.FromSeconds(3));
 
             try
             {
-                foreach (var process in Process.GetProcesses())
+                var task = Task.Run(() =>
                 {
-                    try
+                    foreach (var process in Process.GetProcesses())
                     {
-                        string processName = process.ProcessName;
-                        if (!candidateNames.Contains(processName))
-                            continue;
+                        if (cts.Token.IsCancellationRequested)
+                            break;
 
-                        matches.Add(new RunningProcessInfo(
-                            process.Id,
-                            processName,
-                            TryGetExecutablePath(process),
-                            GetSafeStartTime(process)));
+                        try
+                        {
+                            string processName = process.ProcessName;
+                            if (!candidateNames.Contains(processName))
+                                continue;
+
+                            matches.Add(new RunningProcessInfo(
+                                process.Id,
+                                processName,
+                                TryGetExecutablePath(process),
+                                GetSafeStartTime(process)));
+                        }
+                        catch
+                        {
+                            // Ignore processes that disappear or deny access during snapshot.
+                        }
+                        finally
+                        {
+                            process.Dispose();
+                        }
                     }
-                    catch
-                    {
-                        // Ignore processes that disappear or deny access during snapshot.
-                    }
-                    finally
-                    {
-                        process.Dispose();
-                    }
-                }
+                }, cts.Token);
+
+                task.Wait(TimeSpan.FromSeconds(3));
             }
             catch
             {
@@ -536,31 +547,40 @@ namespace TrayMirror
             var matchTokens = GetProcessMatchTokens(app).ToHashSet(StringComparer.OrdinalIgnoreCase);
             var matches = new List<RunningProcessInfo>();
             bool includeWeChatFamily = IsWeChatFamily(app);
+            var cts = new CancellationTokenSource(TimeSpan.FromSeconds(3));
 
             try
             {
-                foreach (var process in Process.GetProcesses())
+                var task = Task.Run(() =>
                 {
-                    try
+                    foreach (var process in Process.GetProcesses())
                     {
-                        if (!ProcessMatchesActivation(process, matchTokens, includeWeChatFamily))
-                            continue;
+                        if (cts.Token.IsCancellationRequested)
+                            break;
 
-                        matches.Add(new RunningProcessInfo(
-                            process.Id,
-                            process.ProcessName,
-                            TryGetExecutablePath(process),
-                            GetSafeStartTime(process)));
+                        try
+                        {
+                            if (!ProcessMatchesActivation(process, matchTokens, includeWeChatFamily))
+                                continue;
+
+                            matches.Add(new RunningProcessInfo(
+                                process.Id,
+                                process.ProcessName,
+                                TryGetExecutablePath(process),
+                                GetSafeStartTime(process)));
+                        }
+                        catch
+                        {
+                            // Ignore processes that disappear or deny access during snapshot.
+                        }
+                        finally
+                        {
+                            process.Dispose();
+                        }
                     }
-                    catch
-                    {
-                        // Ignore processes that disappear or deny access during snapshot.
-                    }
-                    finally
-                    {
-                        process.Dispose();
-                    }
-                }
+                }, cts.Token);
+
+                task.Wait(TimeSpan.FromSeconds(3));
             }
             catch
             {

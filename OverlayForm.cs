@@ -240,6 +240,8 @@ namespace TrayMirror
 
             try
             {
+                MaintainZOrder();
+
                 var previousStates = _icons.Select(icon => icon.Icon != null).ToArray();
 
                 SyncIcons();
@@ -268,6 +270,16 @@ namespace TrayMirror
             {
                 _updateTimer.Start();
             }
+        }
+
+        /// <summary>
+        /// 无条件把 overlay 重新置顶到 TopMost 层顶部，确保始终盖住主屏/副屏任务栏。
+        /// 已是最顶时此调用是无操作，开销可忽略。
+        /// </summary>
+        private void MaintainZOrder()
+        {
+            NativeMethods.SetWindowPos(Handle, NativeMethods.HWND_TOPMOST, 0, 0, 0, 0,
+                NativeMethods.SWP_NOMOVE | NativeMethods.SWP_NOSIZE | NativeMethods.SWP_NOACTIVATE);
         }
 
         protected override void Dispose(bool disposing)
