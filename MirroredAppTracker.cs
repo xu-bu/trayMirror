@@ -9,40 +9,6 @@ namespace TrayMirror
 {
     internal sealed class MirroredAppTracker : IDisposable
     {
-        // if app exits, update its state then it will disappear from tray mirror
-        public void UpdateIconStates(IReadOnlyList<MirroredIconDefinition> icons)
-        {
-            if (icons.Count == 0)
-                return;
-
-            var candidateNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            foreach (var icon in icons)
-            {
-                foreach (var name in icon.CandidateProcessNames)
-                    candidateNames.Add(name);
-            }
-
-            var processes = SnapshotRunningProcesses(candidateNames);
-            foreach (var icon in icons)
-                ApplyIconState(icon, processes);
-        }
-
-        private static void ApplyIconState(MirroredIconDefinition icon, IReadOnlyList<RunningProcessInfo> processes)
-        {
-            var match = FindAppProcess(icon, processes);
-            if (match == null)
-                return; // 进程已退出：由 SyncIcons（Overlay）负责从列表移除，这里只刷新运行态
-
-            icon.ProcessId = match.Id;
-            icon.IconSourcePath = Utils.NormalizeExecutablePath(match.Path) ?? icon.IconSourcePath;
-
-            Icon? newIcon = TryExtractIcon(match.Path);
-            if (newIcon != null)
-            {
-                icon.Icon?.Dispose();
-                icon.Icon = newIcon;
-            }
-        }
         /// <summary>
         /// Toggle the mirrored app by showing, restoring, or minimizing its main window.
         /// Win11 no longer exposes tray icons through ToolbarWindow32, so direct window
@@ -343,7 +309,7 @@ namespace TrayMirror
             if (app.ProcessId > 0)
             {
                 string? fromProcessId = Utils.NormalizeExecutablePath(
-                    NativeMethods.GetProcessImagePath(app.ProcessId));
+                    NativeMethods.GetProcessImagePath((uint)app.ProcessId));
                 if (!string.IsNullOrWhiteSpace(fromProcessId) && File.Exists(fromProcessId))
                     return fromProcessId;
             }
@@ -351,7 +317,7 @@ namespace TrayMirror
             if (match != null)
             {
                 string? fromMatchProcessId = Utils.NormalizeExecutablePath(
-                    NativeMethods.GetProcessImagePath(match.Id));
+                    NativeMethods.GetProcessImagePath((uint)match.Id));
                 if (!string.IsNullOrWhiteSpace(fromMatchProcessId) && File.Exists(fromMatchProcessId))
                     return fromMatchProcessId;
             }
@@ -478,109 +444,34 @@ namespace TrayMirror
                 $"class=\"{GetWindowClassName(hwnd)}\"");
         }
 
-        private static RunningProcessInfo? FindAppProcess(
-            MirroredIconDefinition app,
-            IReadOnlyList<RunningProcessInfo> processes)
-        {
-            if (app.ProcessId > 0)
-            {
-                var cached = processes.FirstOrDefault(process => process.Id == app.ProcessId);
-                if (cached != null && IsTargetProcess(cached, app))
-                    return cached;
-            }
-
-            return processes
-                .Where(process => IsTargetProcess(process, app))
-                .OrderByDescending(process => process.StartTime)
-                .FirstOrDefault();
-        }
-
-        private static IReadOnlyList<RunningProcessInfo> SnapshotRunningProcesses(HashSet<string> candidateNames)
-        {
-            var matches = new List<RunningProcessInfo>();
-            var cts = new CancellationTokenSource(TimeSpan.FromSeconds(3));
-
-            try
-            {
-                var task = Task.Run(() =>
-                {
-                    foreach (var process in Process.GetProcesses())
-                    {
-                        if (cts.Token.IsCancellationRequested)
-                            break;
-
-                        try
-                        {
-                            string processName = process.ProcessName;
-                            if (!candidateNames.Contains(processName))
-                                continue;
-
-                            matches.Add(new RunningProcessInfo(
-                                process.Id,
-                                processName,
-                                TryGetExecutablePath(process),
-                                GetSafeStartTime(process)));
-                        }
-                        catch
-                        {
-                            // Ignore processes that disappear or deny access during snapshot.
-                        }
-                        finally
-                        {
-                            process.Dispose();
-                        }
-                    }
-                }, cts.Token);
-
-                task.Wait(TimeSpan.FromSeconds(3));
-            }
-            catch
-            {
-                // Ignore snapshot failures and keep the last known icon state.
-            }
-
-            return matches;
-        }
-
         private static List<RunningProcessInfo> FindAppProcessesForActivation(MirroredIconDefinition app)
         {
             var matchTokens = GetProcessMatchTokens(app).ToHashSet(StringComparer.OrdinalIgnoreCase);
             var matches = new List<RunningProcessInfo>();
             bool includeWeChatFamily = IsWeChatFamily(app);
-            var cts = new CancellationTokenSource(TimeSpan.FromSeconds(3));
 
             try
             {
-                var task = Task.Run(() =>
+                var processes = ProcessEnumerator.EnumerateProcesses(TimeSpan.FromSeconds(2));
+
+                foreach (var process in processes)
                 {
-                    foreach (var process in Process.GetProcesses())
+                    try
                     {
-                        if (cts.Token.IsCancellationRequested)
-                            break;
+                        if (!ProcessMatchesActivation(process, matchTokens, includeWeChatFamily))
+                            continue;
 
-                        try
-                        {
-                            if (!ProcessMatchesActivation(process, matchTokens, includeWeChatFamily))
-                                continue;
-
-                            matches.Add(new RunningProcessInfo(
-                                process.Id,
-                                process.ProcessName,
-                                TryGetExecutablePath(process),
-                                GetSafeStartTime(process)));
-                        }
-                        catch
-                        {
-                            // Ignore processes that disappear or deny access during snapshot.
-                        }
-                        finally
-                        {
-                            process.Dispose();
-                        }
+                        matches.Add(new RunningProcessInfo(
+                            process.Id,
+                            process.ProcessName,
+                            process.Path,
+                            DateTime.MinValue));
                     }
-                }, cts.Token);
-
-                task.Wait(TimeSpan.FromSeconds(3));
+                    catch
+                    {
+                        // Ignore processes that disappear or deny access during snapshot.
+                    }
+                }
             }
             catch
             {
@@ -596,7 +487,7 @@ namespace TrayMirror
                     matches.Add(new RunningProcessInfo(
                         cachedProcess.Id,
                         cachedProcess.ProcessName,
-                        TryGetExecutablePath(cachedProcess),
+                        cachedProcess.MainModule?.FileName,
                         GetSafeStartTime(cachedProcess)));
                     Utils.TraceLog($"  added cached process pid={cachedProcess.Id} name={cachedProcess.ProcessName}");
                 }
@@ -610,7 +501,7 @@ namespace TrayMirror
         }
 
         private static bool ProcessMatchesActivation(
-            Process process,
+            ProcessEnumerator.ProcessInfo process,
             HashSet<string> matchTokens,
             bool includeWeChatFamily)
         {
@@ -622,7 +513,7 @@ namespace TrayMirror
                     processName.Contains(token, StringComparison.OrdinalIgnoreCase)))
                 return true;
 
-            string? path = TryGetExecutablePath(process);
+            string? path = process.Path;
             if (path == null)
                 return false;
 
@@ -731,6 +622,10 @@ namespace TrayMirror
             return className.Contains("Chrome_WidgetWin", StringComparison.OrdinalIgnoreCase) ||
                    className.Contains("Tauri", StringComparison.OrdinalIgnoreCase) ||
                    className.Contains("Qt", StringComparison.OrdinalIgnoreCase) ||
+                   className.Contains("Qt5QWindowIcon", StringComparison.OrdinalIgnoreCase) ||
+                   className.Contains("QWidget", StringComparison.OrdinalIgnoreCase) ||
+                   className.Contains("wegame", StringComparison.OrdinalIgnoreCase) ||
+                   className.Contains("TGP", StringComparison.OrdinalIgnoreCase) ||
                    className.Equals("EVERYTHING", StringComparison.OrdinalIgnoreCase);
         }
 

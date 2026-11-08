@@ -12,20 +12,36 @@ namespace TrayMirror
     /// </summary>
     public class TrayIconReader : IDisposable
     {
+        private static readonly Dictionary<string, Icon> IconCache = new(StringComparer.OrdinalIgnoreCase);
+        private static readonly object IconCacheLock = new();
+
         private bool _disposed;
 
-        public MirroredIconDefinition[] ReadIcons()
+        public sealed record TrayIconSnapshot(
+            MirroredIconDefinition[] Visible,
+            MirroredIconDefinition[] Hidden);
+
+        public TrayIconSnapshot ReadAll()
         {
-            var registeredIcons = ReadRegisteredRunningTrayApps();
-            return registeredIcons.Length > 0
-                ? registeredIcons
-                : ReadTrayAppsAndExtractIcons();
+            // Win11 注册表方案能区分“显示在托盘区”和“收进抽屉”的图标；
+            // 注册表不可用时才回退到旧版发现方案（无法区分隐藏图标）。
+            var registered = ReadRegisteredRunningTrayApps();
+            if (registered != null)
+                return registered;
+
+            return new TrayIconSnapshot(
+                ReadTrayAppsAndExtractIcons(),
+                Array.Empty<MirroredIconDefinition>());
         }
 
-        private static MirroredIconDefinition[] ReadRegisteredRunningTrayApps()
+        private static TrayIconSnapshot? ReadRegisteredRunningTrayApps()
         {
             try
             {
+                if (!NotifyIconRegistryReader.IsAvailable())
+                    return null;
+
+                string selfProcessName = Path.GetFileNameWithoutExtension(Environment.ProcessPath ?? string.Empty);
                 var processIndex = ProcessIndex.Create();
                 var registryEntries = NotifyIconRegistryReader.Read().ToList();
 
@@ -37,6 +53,11 @@ namespace TrayMirror
                         continue;
 
                     if (ShouldSkipProcess(process.ProcessName))
+                        continue;
+
+                    // 不镜像 TrayMirror 自己
+                    if (!string.IsNullOrWhiteSpace(selfProcessName) &&
+                        string.Equals(process.ProcessName, selfProcessName, StringComparison.OrdinalIgnoreCase))
                         continue;
 
                     if (ShouldSkipIcon(entry.DisplayName))
@@ -57,33 +78,42 @@ namespace TrayMirror
                 }
 
                 var orderedMatches = bestMatchesByKey.Values
-                    .OrderBy(match => match.Entry.IsPromoted == 1 ? 0 : 1)
-                    .ThenBy(match => match.Entry.DisplayName, StringComparer.OrdinalIgnoreCase)
+                    .OrderBy(match => match.Entry.DisplayName, StringComparer.OrdinalIgnoreCase)
                     .ToList();
 
-                var icons = new List<MirroredIconDefinition>();
+                // IsPromoted=1：显示在任务栏托盘区；其余（0 或缺省）在“隐藏的图标”抽屉里
+                var visible = new List<MirroredIconDefinition>();
+                var hidden = new List<MirroredIconDefinition>();
                 foreach (var match in orderedMatches)
                 {
                     var icon = CreateMirroredIcon(match.Entry, match.Process);
-                    if (icon.Icon is not null)
-                        icons.Add(icon);
+                    if (icon.Icon is null)
+                        continue;
+
+                    (match.Entry.IsPromoted == 1 ? visible : hidden).Add(icon);
                 }
 
-                return icons.ToArray();
+                return new TrayIconSnapshot(visible.ToArray(), hidden.ToArray());
             }
             catch
             {
-                return Array.Empty<MirroredIconDefinition>();
+                return null;
             }
         }
 
-        private sealed record RegistryProcessMatch(NotifyIconEntry Entry, ProcessInfo Process);
+        private sealed record RegistryProcessMatch(NotifyIconEntry Entry, ProcessEnumerator.ProcessInfo Process);
 
         private static string BuildRegistryMatchKey(NotifyIconEntry entry) =>
             $"{entry.DisplayName}\u001F{entry.ExecutablePath ?? string.Empty}";
 
         private static bool IsPreferredRegistryMatch(RegistryProcessMatch candidate, RegistryProcessMatch current)
         {
+            // 同一个应用同时存在“显示”和“隐藏”两条记录时，优先采用显示在托盘区的那条
+            bool candidatePromoted = candidate.Entry.IsPromoted == 1;
+            bool currentPromoted = current.Entry.IsPromoted == 1;
+            if (candidatePromoted != currentPromoted)
+                return candidatePromoted;
+
             var candidateScore = CompletenessScore(candidate.Entry);
             var currentScore = CompletenessScore(current.Entry);
             if (candidateScore != currentScore)
@@ -95,7 +125,7 @@ namespace TrayMirror
                 StringComparison.OrdinalIgnoreCase) < 0;
         }
 
-        private static MirroredIconDefinition CreateMirroredIcon(NotifyIconEntry entry, ProcessInfo process)
+        private static MirroredIconDefinition CreateMirroredIcon(NotifyIconEntry entry, ProcessEnumerator.ProcessInfo process)
         {
             string? exePath = PickExecutablePath(entry.ExecutablePath, process.Path);
             string processNameFromPath = Path.GetFileNameWithoutExtension(exePath) ?? string.Empty;
@@ -248,69 +278,47 @@ namespace TrayMirror
         {
             var apps = new List<MirroredIconDefinition>();
             var seenProcessNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
 
-            try
+            var processes = ProcessEnumerator.EnumerateProcesses(TimeSpan.FromSeconds(3));
+
+            foreach (var process in processes)
             {
-                var task = Task.Run(() =>
+                try
                 {
-                    foreach (var process in Process.GetProcesses())
+                    string? processName = process.ProcessName;
+                    if (string.IsNullOrWhiteSpace(processName))
+                        continue;
+
+                    if (ShouldSkipProcess(processName))
+                        continue;
+
+                    if (!seenProcessNames.Add(processName))
+                        continue;
+
+                    string? exePath = process.Path;
+                    if (string.IsNullOrWhiteSpace(exePath))
+                        continue;
+
+                    string displayName = GetDisplayName(processName, exePath);
+                    Icon? icon = TryExtractIcon(exePath);
+                    if (icon == null) continue;
+
+                    var app = new MirroredIconDefinition(
+                        displayName,
+                        new[] { processName },
+                        new[] { displayName, processName })
                     {
-                        if (cts.Token.IsCancellationRequested)
-                            break;
+                        Icon = icon,
+                        ProcessId = process.Id,
+                        IconSourcePath = exePath
+                    };
 
-                        try
-                        {
-                            string? processName = process.ProcessName;
-                            if (string.IsNullOrWhiteSpace(processName))
-                                continue;
-
-                            // Skip system processes and background services
-                            if (ShouldSkipProcess(processName))
-                                continue;
-
-                            // Avoid duplicates
-                            lock (seenProcessNames)
-                            {
-                                if (!seenProcessNames.Add(processName))
-                                    continue;
-                            }
-
-                            string? exePath = TryGetExecutablePath(process);
-                            if (string.IsNullOrWhiteSpace(exePath))
-                                continue;
-
-                            string displayName = GetDisplayName(processName, exePath);
-                            Icon? icon = TryExtractIcon(exePath);
-                            if (icon == null) continue;
-
-                            var app = new MirroredIconDefinition(
-                                displayName,
-                                new[] { processName },
-                                new[] { displayName, processName })
-                            {
-                                Icon = icon,
-                                ProcessId = process.Id,
-                                IconSourcePath = exePath
-                            };
-
-                            lock (apps)
-                            {
-                                apps.Add(app);
-                            }
-                        }
-                        catch
-                        {
-                            // Skip processes that can't be accessed
-                        }
-                    }
-                }, cts.Token);
-
-                task.Wait(TimeSpan.FromSeconds(5));
-            }
-            catch
-            {
-                // Return whatever we collected on timeout or error
+                    apps.Add(app);
+                }
+                catch
+                {
+                    // Skip processes that can't be accessed
+                }
             }
 
             return apps.ToArray();
@@ -444,46 +452,28 @@ namespace TrayMirror
 
         private static Icon? TryExtractIconFromApp(string appName)
         {
-            var cts = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+            var processes = ProcessEnumerator.EnumerateProcesses(TimeSpan.FromSeconds(2));
 
-            try
+            foreach (var process in processes)
             {
-                var task = Task.Run(() =>
+                try
                 {
-                    // Try to find a process with a matching name
-                    foreach (var process in Process.GetProcesses())
+                    string? exePath = process.Path;
+                    if (string.IsNullOrWhiteSpace(exePath)) continue;
+
+                    string fileName = System.IO.Path.GetFileNameWithoutExtension(exePath);
+                    string processName = process.ProcessName;
+
+                    if (processName.Equals(appName, StringComparison.OrdinalIgnoreCase) ||
+                        fileName.Equals(appName, StringComparison.OrdinalIgnoreCase))
                     {
-                        if (cts.Token.IsCancellationRequested)
-                            break;
-
-                        try
-                        {
-                            string? exePath = process.MainModule?.FileName;
-                            if (string.IsNullOrWhiteSpace(exePath)) continue;
-
-                            string fileName = System.IO.Path.GetFileNameWithoutExtension(exePath);
-                            string processName = process.ProcessName;
-
-                            // Check if process name matches the app name
-                            if (processName.Equals(appName, StringComparison.OrdinalIgnoreCase) ||
-                                fileName.Equals(appName, StringComparison.OrdinalIgnoreCase))
-                            {
-                                return TryExtractIcon(exePath);
-                            }
-                        }
-                        catch
-                        {
-                            // Skip processes we can't access
-                        }
+                        return TryExtractIcon(exePath);
                     }
-                    return null;
-                }, cts.Token);
-
-                return task.Wait(TimeSpan.FromSeconds(3)) ? task.Result : null;
-            }
-            catch
-            {
-                // Return null on error
+                }
+                catch
+                {
+                    // Skip processes we can't access
+                }
             }
 
             return null;
@@ -495,10 +485,30 @@ namespace TrayMirror
             if (string.IsNullOrWhiteSpace(exePath) || !File.Exists(exePath))
                 return null;
 
+            // 每秒同步都会重新发现全部托盘应用，命中缓存可避免反复读盘提取图标
+            lock (IconCacheLock)
+            {
+                if (IconCache.TryGetValue(exePath, out var cached))
+                {
+                    try { return (Icon)cached.Clone(); }
+                    catch { /* fall through and re-extract */ }
+                }
+            }
+
             try
             {
                 using var extracted = Icon.ExtractAssociatedIcon(exePath);
-                return extracted == null ? null : (Icon)extracted.Clone();
+                if (extracted == null)
+                    return null;
+
+                Icon result = (Icon)extracted.Clone();
+                lock (IconCacheLock)
+                {
+                    if (!IconCache.ContainsKey(exePath))
+                        IconCache[exePath] = (Icon)extracted.Clone();
+                }
+
+                return result;
             }
             catch
             {
@@ -548,6 +558,12 @@ namespace TrayMirror
         {
             private const string NotifyIconSettingsPath = @"Control Panel\NotifyIconSettings";
 
+            public static bool IsAvailable()
+            {
+                using var root = Registry.CurrentUser.OpenSubKey(NotifyIconSettingsPath, writable: false);
+                return root is not null;
+            }
+
             public static IEnumerable<NotifyIconEntry> Read()
             {
                 using var root = Registry.CurrentUser.OpenSubKey(NotifyIconSettingsPath, writable: false);
@@ -588,11 +604,11 @@ namespace TrayMirror
 
         private sealed class ProcessIndex
         {
-            private readonly Dictionary<string, ProcessInfo> _byFullPath;
-            private readonly Dictionary<string, List<ProcessInfo>> _byFileName;
-            private readonly Dictionary<string, List<ProcessInfo>> _byProcessName;
+            private readonly Dictionary<string, ProcessEnumerator.ProcessInfo> _byFullPath;
+            private readonly Dictionary<string, List<ProcessEnumerator.ProcessInfo>> _byFileName;
+            private readonly Dictionary<string, List<ProcessEnumerator.ProcessInfo>> _byProcessName;
 
-            private ProcessIndex(IEnumerable<ProcessInfo> processes)
+            public ProcessIndex(IEnumerable<ProcessEnumerator.ProcessInfo> processes)
             {
                 var processList = processes.ToList();
 
@@ -613,41 +629,12 @@ namespace TrayMirror
 
             public static ProcessIndex Create()
             {
-                // Use a timeout to prevent hanging on first boot when many processes are starting
-                var processes = new List<Process>();
-                var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
-
-                try
-                {
-                    var task = Task.Run(() =>
-                    {
-                        foreach (var process in Process.GetProcesses())
-                        {
-                            if (cts.Token.IsCancellationRequested)
-                                break;
-
-                            try
-                            {
-                                processes.Add(process);
-                            }
-                            catch
-                            {
-                                // Skip processes we can't access
-                            }
-                        }
-                    }, cts.Token);
-
-                    task.Wait(TimeSpan.FromSeconds(5));
-                }
-                catch
-                {
-                    // On timeout or error, use whatever processes we collected
-                }
-
-                return new ProcessIndex(processes.Select(ProcessInfo.FromProcess));
+                // Use EnumProcesses API for safer enumeration during boot
+                var processes = ProcessEnumerator.EnumerateProcesses(TimeSpan.FromSeconds(3));
+                return new ProcessIndex(processes);
             }
 
-            public ProcessInfo? Match(NotifyIconEntry entry)
+            public ProcessEnumerator.ProcessInfo? Match(NotifyIconEntry entry)
             {
                 if (!string.IsNullOrWhiteSpace(entry.ExecutablePath) &&
                     _byFullPath.TryGetValue(entry.ExecutablePath, out var exactPathMatch))
@@ -669,30 +656,6 @@ namespace TrayMirror
                 }
 
                 return null;
-            }
-        }
-
-        private sealed record ProcessInfo(
-            int Id,
-            string ProcessName,
-            string? Path)
-        {
-            public string? FileName =>
-                string.IsNullOrWhiteSpace(Path) ? null : System.IO.Path.GetFileName(Path);
-
-            public static ProcessInfo FromProcess(Process process)
-            {
-                try
-                {
-                    return new ProcessInfo(
-                        process.Id,
-                        process.ProcessName,
-                        Utils.NormalizeExecutablePath(process.MainModule?.FileName));
-                }
-                catch
-                {
-                    return new ProcessInfo(process.Id, process.ProcessName, null);
-                }
             }
         }
 

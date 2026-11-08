@@ -193,6 +193,28 @@ namespace TrayMirror
         private static string Indent(int depth) =>
             new(' ', depth * 2);
 
+        private static bool? _lightTheme;
+
+        /// <summary>Windows 应用/任务栏是否使用浅色主题。</summary>
+        public static bool IsLightTheme()
+        {
+            if (_lightTheme.HasValue)
+                return _lightTheme.Value;
+
+            try
+            {
+                using var key = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(
+                    @"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize");
+                _lightTheme = key?.GetValue("SystemUsesLightTheme") is int value ? value != 0 : true;
+            }
+            catch
+            {
+                _lightTheme = true;
+            }
+
+            return _lightTheme.Value;
+        }
+
         public static void TraceLog(string message)
         {
             string line = $"[{DateTime.Now:HH:mm:ss.fff}] {message}";

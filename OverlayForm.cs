@@ -1,3 +1,5 @@
+using System.Drawing.Drawing2D;
+
 namespace TrayMirror
 {
     /// <summary>
@@ -20,21 +22,45 @@ namespace TrayMirror
         private readonly MirroredAppTracker _tracker = new();
         private readonly Screen _targetScreen;
         private readonly List<MirroredIconDefinition> _icons = new();
+        private readonly List<MirroredIconDefinition> _hiddenIcons = new();
         private readonly System.Windows.Forms.Timer _updateTimer;
+        private readonly TrayDrawerForm _drawer;
         private MirroredIconDefinition? _hoveredIcon;
         private float _hoverAnimationProgress;
+        private bool _menuPaused;
+        private bool _drawerPaused;
+        private bool _scanRunning;
+        private bool _disposed;
+        private Rectangle _chevronBounds = Rectangle.Empty;
+        private bool _chevronHovered;
 
         public Overlay(Screen targetScreen)
         {
+            Utils.TraceLog("Overlay: constructor starting");
             // to know which screen is secondary screen
             _targetScreen = targetScreen;
+            Utils.TraceLog("Overlay: creating TrayIconReader");
             using var reader = new TrayIconReader();
-            _icons.AddRange(reader.ReadIcons());
+            Utils.TraceLog("Overlay: calling ReadAll");
+            var snapshot = reader.ReadAll();
+            _icons.AddRange(snapshot.Visible);
+            _hiddenIcons.AddRange(snapshot.Hidden);
+            Utils.TraceLog($"Overlay: ReadAll returned {_icons.Count} visible, {_hiddenIcons.Count} hidden icons");
+
+            // 隐藏图标抽屉：点镜像条右侧的 ^ 展开
+            _drawer = new TrayDrawerForm();
+            _drawer.IconActivated += icon => _tracker.Activate(icon);
+            _drawer.VisibleChanged += (_, _) =>
+            {
+                SetDrawerPaused(_drawer.Visible);
+                Invalidate();
+            };
 
             // Setup update timer for real-time sync
             _updateTimer = new System.Windows.Forms.Timer
             {
-                Interval = 1000 // Update every 1 second
+                // 扫描在后台线程执行，间隔不必太密；托盘图标变化本来就不频繁
+                Interval = 3000
             };
             _updateTimer.Tick += OnUpdateTimerTick;
             _updateTimer.Start();
@@ -53,9 +79,11 @@ namespace TrayMirror
             {
                 _hoveredIcon = null;
                 _hoverAnimationProgress = 0f;
+                _chevronHovered = false;
                 Invalidate();
             };
             CreateHandle();
+            Utils.TraceLog("Overlay: constructor completed");
         }
 
         // prevent tray mirror stealing key board focus
@@ -80,7 +108,8 @@ namespace TrayMirror
             {
                 int x = unchecked((short)(int)m.LParam);
                 int y = unchecked((short)((int)m.LParam >> 16));
-                if (FindIconAt(PointToClient(new Point(x, y))) == null)
+                var point = PointToClient(new Point(x, y));
+                if (FindIconAt(point) == null && !IsChevronPoint(point))
                 {
                     m.Result = (IntPtr)HTTRANSPARENT;
                     return;
@@ -94,7 +123,8 @@ namespace TrayMirror
         public void PositionOverlay()
         {
             int runningCount = Math.Max(1, _icons.Count(i => i.Icon != null));
-            int width = IconWidth * runningCount;
+            int cellCount = runningCount + (HasHiddenIcons ? 1 : 0);
+            int width = IconWidth * cellCount;
             var bounds = _targetScreen.Bounds;
 
             int rightAnchor = bounds.Right - HardcodedRightAnchorOffset;
@@ -110,6 +140,9 @@ namespace TrayMirror
 
             Size = new Size(width, OverlayHeight);
             UpdateIconBounds();
+
+            if (_drawer.Visible)
+                _drawer.UpdateAnchor(RectangleToScreen(ClientRectangle));
         }
 
         protected override void OnPaintBackground(PaintEventArgs e)
@@ -134,10 +167,28 @@ namespace TrayMirror
                     icon.Bounds.Width, icon.Bounds.Height);
                 g.DrawIcon(icon.Icon ?? SystemIcons.Application, drawBounds);
             }
+
+            if (HasHiddenIcons && _chevronBounds.Width > 0)
+                DrawDrawerButton(g);
         }
 
         private void OnMouseMove(object? sender, MouseEventArgs e)
         {
+            bool overChevron = IsChevronPoint(e.Location);
+            if (overChevron != _chevronHovered)
+            {
+                _chevronHovered = overChevron;
+                Invalidate();
+            }
+
+            if (overChevron)
+            {
+                _hoveredIcon = null;
+                _hoverAnimationProgress = 0f;
+                Cursor = Cursors.Hand;
+                return;
+            }
+
             var icon = FindIconAt(e.Location);
             if (icon != _hoveredIcon)
             {
@@ -166,12 +217,85 @@ namespace TrayMirror
             if (e.Button != MouseButtons.Left)
                 return;
 
+            if (IsChevronPoint(e.Location))
+            {
+                ToggleDrawer();
+                return;
+            }
+
             var icon = FindIconAt(e.Location);
             if (icon == null)
                 return;
 
             Utils.TraceLog($"Overlay click: {icon.DisplayName} at ({e.X},{e.Y})");
             _tracker.Activate(icon);
+        }
+
+        private bool IsChevronPoint(Point point) =>
+            HasHiddenIcons && _chevronBounds.Contains(point);
+
+        private bool HasHiddenIcons => _hiddenIcons.Any(icon => icon.Icon != null);
+
+        private void ToggleDrawer()
+        {
+            if (_drawer.Visible)
+            {
+                _drawer.Hide();
+                return;
+            }
+
+            var hidden = _hiddenIcons.Where(icon => icon.Icon != null).ToList();
+            if (hidden.Count == 0)
+                return;
+
+            _drawer.ShowFor(RectangleToScreen(ClientRectangle), hidden);
+            Invalidate();
+        }
+
+        private void DrawDrawerButton(Graphics g)
+        {
+            bool light = Utils.IsLightTheme();
+            const int pillSize = 34;
+            int lift = _chevronHovered ? 2 : 0;
+
+            var pill = new Rectangle(
+                _chevronBounds.X + (_chevronBounds.Width - pillSize) / 2,
+                _chevronBounds.Y + (_chevronBounds.Height - pillSize) / 2 - lift,
+                pillSize, pillSize);
+
+            using var path = RoundedRect(pill, 9);
+            Color fill = light
+                ? (_chevronHovered ? Color.FromArgb(238, 238, 238) : Color.White)
+                : (_chevronHovered ? Color.FromArgb(64, 64, 64) : Color.FromArgb(44, 44, 44));
+            using var brush = new SolidBrush(fill);
+            g.FillPath(brush, path);
+
+            using var pen = new Pen(
+                light ? Color.FromArgb(26, 26, 26) : Color.FromArgb(240, 240, 240), 2f)
+            {
+                StartCap = LineCap.Round,
+                EndCap = LineCap.Round,
+                LineJoin = LineJoin.Round
+            };
+
+            int cx = pill.X + pill.Width / 2;
+            int cy = pill.Y + pill.Height / 2;
+            Point[] glyph = _drawer.Visible
+                ? new[] { new Point(cx - 6, cy - 3), new Point(cx, cy + 3), new Point(cx + 6, cy - 3) }
+                : new[] { new Point(cx - 6, cy + 3), new Point(cx, cy - 3), new Point(cx + 6, cy + 3) };
+            g.DrawLines(pen, glyph);
+        }
+
+        private static GraphicsPath RoundedRect(Rectangle bounds, int radius)
+        {
+            var path = new GraphicsPath();
+            int diameter = radius * 2;
+            path.AddArc(bounds.X, bounds.Y, diameter, diameter, 180, 90);
+            path.AddArc(bounds.Right - diameter, bounds.Y, diameter, diameter, 270, 90);
+            path.AddArc(bounds.Right - diameter, bounds.Bottom - diameter, diameter, diameter, 0, 90);
+            path.AddArc(bounds.X, bounds.Bottom - diameter, diameter, diameter, 90, 90);
+            path.CloseFigure();
+            return path;
         }
 
         private MirroredIconDefinition? FindIconAt(Point location)
@@ -182,6 +306,18 @@ namespace TrayMirror
         private void UpdateIconBounds()
         {
             int x = Width - IconWidth;
+
+            // 最右侧留给“抽屉”按钮，可见图标从右往左排
+            if (HasHiddenIcons)
+            {
+                _chevronBounds = new Rectangle(x, 0, IconWidth, OverlayHeight);
+                x -= IconWidth;
+            }
+            else
+            {
+                _chevronBounds = Rectangle.Empty;
+            }
+
             foreach (var icon in _icons)
             {
                 if (icon.Icon == null)
@@ -196,58 +332,186 @@ namespace TrayMirror
         }
 
         /// <summary>
-        /// Re-discover tray apps so apps started after TrayMirror appear on the overlay,
-        /// and apps that exited disappear.
+        /// 把后台扫描结果合并进现有图标列表（只在 UI 线程调用），
+        /// 同时用最新快照刷新进程 ID 和图标路径，替代原来的 UpdateIconStates 二次枚举。
         /// </summary>
-        private void SyncIcons()
+        private void ApplySnapshot(TrayIconReader.TrayIconSnapshot snapshot)
         {
-            MirroredIconDefinition[] latest;
-            try
-            {
-                using var reader = new TrayIconReader();
-                latest = reader.ReadIcons();
-            }
-            catch
-            {
-                return; // keep last known state on reader failure
-            }
+            string hiddenBefore = BuildIconSignature(_hiddenIcons);
 
+            MergeIcons(_icons, snapshot.Visible);
+            MergeIcons(_hiddenIcons, snapshot.Hidden);
+
+            if (!_drawer.Visible)
+                return;
+
+            if (!HasHiddenIcons)
+            {
+                _drawer.Hide();
+            }
+            else if (hiddenBefore != BuildIconSignature(_hiddenIcons))
+            {
+                _drawer.UpdateIcons(_hiddenIcons.Where(icon => icon.Icon != null).ToList());
+            }
+        }
+
+        private static void MergeIcons(
+            List<MirroredIconDefinition> current,
+            MirroredIconDefinition[] latest)
+        {
             var latestKeys = latest.Select(GetIconKey).ToHashSet(StringComparer.OrdinalIgnoreCase);
-            var existingKeys = _icons.Select(GetIconKey).ToHashSet(StringComparer.OrdinalIgnoreCase);
 
-            for (int i = _icons.Count - 1; i >= 0; i--)
+            for (int i = current.Count - 1; i >= 0; i--)
             {
-                if (!latestKeys.Contains(GetIconKey(_icons[i])))
+                if (!latestKeys.Contains(GetIconKey(current[i])))
                 {
-                    _icons[i].Icon?.Dispose();
-                    _icons.RemoveAt(i);
+                    current[i].Icon?.Dispose();
+                    current.RemoveAt(i);
                 }
             }
 
+            var existingKeys = current.Select(GetIconKey).ToHashSet(StringComparer.OrdinalIgnoreCase);
+
             foreach (var icon in latest)
             {
-                if (!existingKeys.Contains(GetIconKey(icon)))
-                    _icons.Add(icon);
+                string key = GetIconKey(icon);
+                if (existingKeys.Contains(key))
+                {
+                    var existing = current.FirstOrDefault(item => GetIconKey(item) == key);
+                    if (existing != null)
+                        MergeIconState(existing, icon);
+                    else
+                        icon.Icon?.Dispose();
+                    continue;
+                }
+
+                current.Add(icon);
+                existingKeys.Add(key);
             }
         }
+
+        private static void MergeIconState(MirroredIconDefinition existing, MirroredIconDefinition latest)
+        {
+            existing.ProcessId = latest.ProcessId;
+
+            bool pathChanged = !string.Equals(
+                existing.IconSourcePath, latest.IconSourcePath, StringComparison.OrdinalIgnoreCase);
+            bool iconMissing = existing.Icon == null && latest.Icon != null;
+
+            if ((pathChanged || iconMissing) && latest.Icon != null)
+            {
+                existing.Icon?.Dispose();
+                existing.Icon = latest.Icon;
+                latest.Icon = null; // 所有权转移，避免重复释放
+            }
+            else
+            {
+                // 已有同名图标，这次新提取的副本直接释放，避免堆积 GDI 句柄
+                latest.Icon?.Dispose();
+            }
+
+            existing.IconSourcePath = latest.IconSourcePath;
+        }
+
+        private static void DisposeIcons(TrayIconReader.TrayIconSnapshot snapshot)
+        {
+            foreach (var icon in snapshot.Visible)
+                icon.Icon?.Dispose();
+            foreach (var icon in snapshot.Hidden)
+                icon.Icon?.Dispose();
+        }
+
+        private static string BuildIconSignature(IEnumerable<MirroredIconDefinition> icons) =>
+            string.Join("|", icons.Select(GetIconKey));
 
         private static string GetIconKey(MirroredIconDefinition icon) =>
             string.Join("|", icon.CandidateProcessNames);
 
-        private void OnUpdateTimerTick(object? sender, EventArgs e)
+        /// <summary>
+        /// 托盘菜单/图标抽屉打开时暂停刷新：扫描（枚举进程 + 提取图标）跑在 UI 线程上，
+        /// 会和菜单、抽屉共用消息循环，导致悬停卡顿、点桌面后延迟消失。
+        /// </summary>
+        public void SetRefreshPaused(bool paused)
         {
-            _updateTimer.Stop();
+            if (_menuPaused == paused)
+                return;
 
+            _menuPaused = paused;
+            Utils.TraceLog($"Refresh: menu {(paused ? "paused" : "resumed")}");
+            UpdateRefreshTimer();
+        }
+
+        private void SetDrawerPaused(bool paused)
+        {
+            if (_drawerPaused == paused)
+                return;
+
+            _drawerPaused = paused;
+            Utils.TraceLog($"Refresh: drawer {(paused ? "paused" : "resumed")}");
+            UpdateRefreshTimer();
+        }
+
+        private bool RefreshPaused => _menuPaused || _drawerPaused;
+
+        private void UpdateRefreshTimer()
+        {
+            if (_disposed)
+                return;
+
+            if (RefreshPaused)
+                _updateTimer.Stop();
+            else if (!_updateTimer.Enabled)
+                _updateTimer.Start();
+        }
+
+        /// <summary>
+        /// 进程枚举 + 图标提取（单次 1~2 秒）放到线程池，UI 线程只负责合并结果和重画，
+        /// 扫描期间鼠标/菜单/抽屉消息不再被阻塞。
+        /// </summary>
+        private async void OnUpdateTimerTick(object? sender, EventArgs e)
+        {
+            if (RefreshPaused || _scanRunning)
+                return;
+
+            _scanRunning = true;
             try
             {
                 MaintainZOrder();
 
+                TrayIconReader.TrayIconSnapshot snapshot;
+                try
+                {
+                    snapshot = await Task.Run(() =>
+                    {
+                        using var reader = new TrayIconReader();
+                        return reader.ReadAll();
+                    });
+                }
+                catch (Exception ex)
+                {
+                    Utils.TraceLog($"Refresh: scan failed: {ex.Message}");
+                    return;
+                }
+
+                if (_disposed || IsDisposed)
+                {
+                    DisposeIcons(snapshot);
+                    return;
+                }
+
+                // 扫描期间菜单/抽屉被打开：丢弃结果，恢复后下一轮再扫
+                if (RefreshPaused)
+                {
+                    DisposeIcons(snapshot);
+                    return;
+                }
+
                 var previousStates = _icons.Select(icon => icon.Icon != null).ToArray();
+                bool hadDrawer = HasHiddenIcons;
 
-                SyncIcons();
-                _tracker.UpdateIconStates(_icons);
+                ApplySnapshot(snapshot);
 
-                bool needsRepaint = previousStates.Length != _icons.Count;
+                bool needsRepaint = hadDrawer != HasHiddenIcons || previousStates.Length != _icons.Count;
                 if (!needsRepaint)
                 {
                     for (int i = 0; i < _icons.Count; i++)
@@ -265,10 +529,17 @@ namespace TrayMirror
                     PositionOverlay();
                     Invalidate();
                 }
+
+                if (_drawer.Visible)
+                    _drawer.Invalidate();
+            }
+            catch (Exception ex)
+            {
+                Utils.TraceLog($"Refresh: apply failed: {ex.Message}");
             }
             finally
             {
-                _updateTimer.Start();
+                _scanRunning = false;
             }
         }
 
@@ -286,12 +557,18 @@ namespace TrayMirror
         {
             if (disposing)
             {
+                _disposed = true;
                 _updateTimer?.Stop();
                 _updateTimer?.Dispose();
                 foreach (var icon in _icons)
                 {
                     icon.Icon?.Dispose();
                 }
+                foreach (var icon in _hiddenIcons)
+                {
+                    icon.Icon?.Dispose();
+                }
+                _drawer?.Dispose();
             }
             base.Dispose(disposing);
         }

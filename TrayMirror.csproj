@@ -8,8 +8,12 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <AssemblyName>TrayMirror</AssemblyName>
     <RootNamespace>TrayMirror</RootNamespace>
+    <ApplicationIcon>app.ico</ApplicationIcon>
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="ManagedShell" Version="0.0.337" />
+  </ItemGroup>
+  <ItemGroup>
+    <EmbeddedResource Include="app.ico" />
   </ItemGroup>
 </Project>

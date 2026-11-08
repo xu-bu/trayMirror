@@ -28,6 +28,59 @@ namespace TrayMirror
             }
         }
 
+        // ── 进程枚举 ──────────────────────────────────────────────────
+        [DllImport("psapi.dll", SetLastError = true)]
+        public static extern bool EnumProcesses(uint[] lpidProcessIds, uint cb, out uint lpcbNeeded);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        public static extern IntPtr OpenProcess(uint dwDesiredAccess, bool bInheritHandle, uint dwProcessId);
+
+        [DllImport("psapi.dll", SetLastError = true)]
+        public static extern uint GetModuleFileNameEx(IntPtr hProcess, IntPtr hModule, StringBuilder lpBaseName, uint nSize);
+
+        public static uint[] EnumerateProcessIds()
+        {
+            uint arraySize = 1024;
+            uint bytesReturned;
+
+            while (true)
+            {
+                var processIds = new uint[arraySize];
+                if (!EnumProcesses(processIds, arraySize * 4, out bytesReturned))
+                    return Array.Empty<uint>();
+
+                if (bytesReturned < arraySize * 4)
+                {
+                    uint processCount = bytesReturned / 4;
+                    var result = new uint[processCount];
+                    Array.Copy(processIds, result, processCount);
+                    return result;
+                }
+
+                arraySize *= 2;
+            }
+        }
+
+        public static string? GetProcessImagePath(uint processId)
+        {
+            IntPtr hProcess = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, processId);
+            if (hProcess == IntPtr.Zero)
+                return null;
+
+            try
+            {
+                var buffer = new StringBuilder(1024);
+                int size = buffer.Capacity;
+                return QueryFullProcessImageName(hProcess, 0, buffer, ref size)
+                    ? buffer.ToString()
+                    : null;
+            }
+            finally
+            {
+                CloseHandle(hProcess);
+            }
+        }
+
         // ── 窗口查找 ────────────────────────────────────────────────
         [DllImport("user32.dll", SetLastError = true)]
         public static extern IntPtr FindWindow(string? lpClassName, string? lpWindowName);
@@ -46,26 +99,6 @@ namespace TrayMirror
             int dwFlags,
             StringBuilder lpExeName,
             ref int lpdwSize);
-
-        public static string? GetProcessImagePath(int processId)
-        {
-            IntPtr hProcess = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, (uint)processId);
-            if (hProcess == IntPtr.Zero)
-                return null;
-
-            try
-            {
-                var buffer = new StringBuilder(1024);
-                int size = buffer.Capacity;
-                return QueryFullProcessImageName(hProcess, 0, buffer, ref size)
-                    ? buffer.ToString()
-                    : null;
-            }
-            finally
-            {
-                CloseHandle(hProcess);
-            }
-        }
 
         [DllImport("user32.dll")]
         public static extern bool SetFocus(IntPtr hWnd);
@@ -98,9 +131,6 @@ namespace TrayMirror
         public static extern bool PostMessage(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam);
 
         // ── 跨进程内存读取（用于 TB_GETBUTTON）─────────────────────
-        [DllImport("kernel32.dll", SetLastError = true)]
-        public static extern IntPtr OpenProcess(uint dwDesiredAccess, bool bInheritHandle, uint dwProcessId);
-
         [DllImport("kernel32.dll", SetLastError = true)]
         public static extern bool CloseHandle(IntPtr hObject);
 
